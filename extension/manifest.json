@@ -1,0 +1,8 @@
+{
+  "manifest_version": 3,
+  "name": "ApplyPilot Application Assistant",
+  "version": "2.0.0",
+  "description": "Detect hiring platforms, fill approved answers, attach a resume, and pause for review before submission.",
+  "permissions": ["activeTab", "scripting", "storage", "unlimitedStorage"],
+  "action": {"default_title": "ApplyPilot Application Assistant", "default_popup": "popup.html"}
+}

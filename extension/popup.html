@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ApplyPilot Assistant</title><link rel="stylesheet" href="popup.css"></head>
+<body><main>
+  <header><span class="logo">➤</span><div><h1>ApplyPilot</h1><p>Application assistant</p></div><span id="platform">Open a job</span></header>
+  <section class="status"><i id="dot"></i><div><strong id="profile-status">Profile needed</strong><p id="profile-detail">Import your dashboard profile.</p></div></section>
+  <div class="imports">
+    <label>Import profile<input id="profile-file" type="file" accept=".json,application/json"></label>
+    <label><span id="resume-label">Add resume</span><input id="resume-file" type="file" accept=".pdf,.doc,.docx"></label>
+  </div>
+  <button id="run" disabled>Run application assistant</button>
+  <button id="next" class="secondary" disabled>Fill the next page</button>
+  <p id="result" role="status" aria-live="polite"></p>
+  <section id="report" class="report" hidden><div><b id="filled">0</b><span>Filled</span></div><div><b id="blocked">0</b><span>Needs you</span></div><div><b id="uploaded">No</b><span>Resume</span></div></section>
+  <section id="blockers" class="blockers" hidden><strong>Review these questions</strong><ul id="blocker-list"></ul></section>
+  <aside><strong>Final approval stays with you.</strong><p>ApplyPilot never handles passwords, CAPTCHAs, demographic choices, legal attestations, or the final Submit button.</p></aside>
+</main><script src="popup.js"></script></body></html>
