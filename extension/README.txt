@@ -1,4 +1,4 @@
-ApplyPilot Application Assistant 2.0 for Google Chrome on macOS
+ApplyPilot Application Assistant 2.1 for Google Chrome on macOS
 
 1. Double-click the ZIP file to unzip it.
 2. Open Chrome and visit chrome://extensions.
@@ -14,3 +14,9 @@ The assistant detects common hiring platforms, fills approved blank fields,
 answers routine work-authorization questions from your profile, and attaches
 your chosen resume. It does not enter passwords, answer demographic or legal
 attestation questions, bypass CAPTCHAs, or click the final Submit button.
+
+New in 2.1: fills work history, education and skills from your dashboard
+profile. Eligibility questions are answered only from the Yes/No choices on
+your profile and only when the question's wording is clear. "Fill the next
+page" only presses a Next or Continue button that doesn't send the form, and
+never on a page that looks like the final step.

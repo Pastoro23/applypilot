@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { buildAutofillProfile, educationFields, workFields } from "./profile-records";
 import { MasterResumePanel, TailorPanel, parseTailored, readJobLink } from "./tailoring";
 
 type View = "overview" | "profile" | "resumes" | "applications" | "accounts" | "extension";
@@ -21,6 +22,11 @@ type Profile = {
   linkedIn: string;
   workAuthorization: string;
   sponsorship: string;
+  workAuthorized: string;
+  requiresSponsorship: string;
+  skills: string;
+  workHistory: string;
+  education: string;
   availability: string;
   relocation: string;
   identityStatus: string;
@@ -306,21 +312,7 @@ function SignedInDashboard() {
 
   function downloadProfile() {
     if (!profileForm) return;
-    const payload = {
-      schemaVersion: 1,
-      firstName: profileForm.firstName,
-      lastName: profileForm.lastName,
-      fullName: `${profileForm.firstName} ${profileForm.lastName}`.trim(),
-      email: profileForm.profileEmail,
-      phone: profileForm.phone,
-      city: profileForm.city,
-      state: profileForm.state,
-      postalCode: profileForm.postalCode,
-      country: profileForm.country,
-      linkedIn: profileForm.linkedIn,
-      workAuthorization: profileForm.workAuthorization,
-      sponsorship: profileForm.sponsorship,
-    };
+    const payload = buildAutofillProfile(profileForm);
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -735,11 +727,38 @@ function ProfileView({
       <Panel>
         <SectionTitle title="Eligibility and availability" note="Review these answers for every job; the employer's wording can differ." />
         <div className="mt-5 grid gap-4 md:grid-cols-2">
-          <Field label="Work authorization"><input className={inputClass} value={profile.workAuthorization} onChange={(event) => update("workAuthorization", event.target.value)} /></Field>
-          <Field label="Sponsorship answer"><input className={inputClass} value={profile.sponsorship} onChange={(event) => update("sponsorship", event.target.value)} /></Field>
+          <Field label="Authorized to work in the U.S.?" hint="The assistant answers only Yes or No"><YesNoSelect value={profile.workAuthorized} onChange={(value) => update("workAuthorized", value)} /></Field>
+          <Field label="Need visa sponsorship, now or later?"><YesNoSelect value={profile.requiresSponsorship} onChange={(value) => update("requiresSponsorship", value)} /></Field>
+          <Field label="Work authorization wording"><input className={inputClass} value={profile.workAuthorization} onChange={(event) => update("workAuthorization", event.target.value)} /></Field>
+          <Field label="Sponsorship wording"><input className={inputClass} value={profile.sponsorship} onChange={(event) => update("sponsorship", event.target.value)} /></Field>
           <Field label="Available start date"><input className={inputClass} placeholder="Example: Immediately or September 1, 2026" value={profile.availability} onChange={(event) => update("availability", event.target.value)} /></Field>
           <Field label="Work history status" hint="Confirms Modern Technology title and dates"><ConfirmationSelect value={profile.workHistoryStatus} onChange={(value) => update("workHistoryStatus", value)} /></Field>
         </div>
+      </Panel>
+
+      <RecordsEditor
+        title="Work history"
+        note="Most recent first. The assistant copies these into employer forms exactly as written."
+        fields={workFields}
+        value={profile.workHistory}
+        onChange={(value) => update("workHistory", value)}
+        currentLabel="I currently work here"
+        addLabel="Add work experience"
+      />
+
+      <RecordsEditor
+        title="Education"
+        note="Schools, degrees and certificate programs."
+        fields={educationFields}
+        value={profile.education}
+        onChange={(value) => update("education", value)}
+        currentLabel="Still studying here"
+        addLabel="Add education"
+      />
+
+      <Panel>
+        <SectionTitle title="Skills" note="Used for skills boxes on application forms. Separate with commas." />
+        <div className="mt-5"><textarea className={inputClass} rows={3} placeholder="Example: Active Directory, Windows 11, ServiceNow, TCP/IP" value={profile.skills} onChange={(event) => update("skills", event.target.value)} /></div>
       </Panel>
 
       <div className="sticky bottom-4 z-10 flex items-center justify-between gap-4 rounded-2xl border border-slate-700 bg-[#0d1a2c]/95 p-4 shadow-2xl backdrop-blur-xl">
@@ -994,11 +1013,11 @@ function ExtensionView({ onDownloadProfile, readiness }: { onDownloadProfile: ()
       <section className="overflow-hidden rounded-[28px] border border-blue-500/20 bg-[radial-gradient(circle_at_85%_10%,rgba(34,211,238,.16),transparent_35%),linear-gradient(135deg,#10233d,#0a1728_65%)] p-6 sm:p-8">
         <div className="grid gap-7 lg:grid-cols-[1.2fr_.8fr] lg:items-center">
           <div>
-            <div className="inline-flex items-center gap-2 rounded-full border border-blue-300/20 bg-blue-400/8 px-3 py-1.5 text-xs font-semibold text-blue-200"><Icon name="bolt" className="h-4 w-4" />Application Assistant 2.0</div>
+            <div className="inline-flex items-center gap-2 rounded-full border border-blue-300/20 bg-blue-400/8 px-3 py-1.5 text-xs font-semibold text-blue-200"><Icon name="bolt" className="h-4 w-4" />Application Assistant 2.1</div>
             <h2 className="mt-5 text-3xl font-semibold tracking-tight text-white sm:text-4xl">Move through applications with fewer repetitive steps.</h2>
             <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300">The upgraded helper detects major hiring platforms, fills approved contact and eligibility answers, attaches your selected resume, highlights questions that need you, and pauses before final submission.</p>
             <div className="mt-6 flex flex-wrap gap-3">
-              <a href="/applypilot-extension.zip" download className="rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-500">Download Application Assistant 2.0</a>
+              <a href="/applypilot-extension.zip" download className="rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-500">Download Application Assistant 2.1</a>
               <button onClick={onDownloadProfile} className="rounded-xl border border-slate-600 bg-slate-900/30 px-5 py-3 text-sm font-semibold text-slate-200 transition hover:bg-slate-800/70">Download my autofill profile</button>
             </div>
           </div>
@@ -1101,6 +1120,54 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
   return <label className="block"><span className="mb-2 flex items-center justify-between gap-2 text-xs font-semibold text-slate-400"><span>{label}</span>{hint && <span className="font-normal text-amber-300/80">{hint}</span>}</span>{children}</label>;
 }
 
+function YesNoSelect({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  return <select className={inputClass} value={value} onChange={(event) => onChange(event.target.value)}><option value="">Ask me on each form</option><option value="yes">Yes</option><option value="no">No</option></select>;
+}
+
+type EditableRecord = Record<string, string | boolean | undefined>;
+
+function parseRows(value: string): EditableRecord[] {
+  try {
+    const rows: unknown = JSON.parse(value || "[]");
+    return Array.isArray(rows) ? rows.filter((row): row is EditableRecord => Boolean(row) && typeof row === "object") : [];
+  } catch {
+    return [];
+  }
+}
+
+function RecordsEditor({ title, note, fields, value, onChange, currentLabel, addLabel }: { title: string; note: string; fields: readonly (readonly [string, string])[]; value: string; onChange: (value: string) => void; currentLabel: string; addLabel: string }) {
+  const rows = parseRows(value);
+  const write = (next: EditableRecord[]) => onChange(JSON.stringify(next));
+  const change = (index: number, key: string, next: string | boolean) => write(rows.map((row, i) => (i === index ? { ...row, [key]: next } : row)));
+  return (
+    <Panel>
+      <SectionTitle title={title} note={note} />
+      <div className="mt-5 space-y-4">
+        {rows.map((row, index) => (
+          <div key={index} className="rounded-2xl border border-slate-800 bg-[#0a1627]/50 p-4">
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              {fields.map(([key, label]) => (
+                <div key={key} className={key === "description" ? "md:col-span-2 xl:col-span-4" : undefined}>
+                  <Field label={label}>
+                    {key === "description"
+                      ? <textarea className={inputClass} rows={3} value={String(row[key] ?? "")} onChange={(event) => change(index, key, event.target.value)} />
+                      : <input className={inputClass} disabled={row.current === true && key.startsWith("end")} value={String(row[key] ?? "")} onChange={(event) => change(index, key, event.target.value)} />}
+                  </Field>
+                </div>
+              ))}
+            </div>
+            <div className="mt-3 flex items-center justify-between gap-4">
+              <label className="flex items-center gap-2 text-xs text-slate-400"><input type="checkbox" checked={row.current === true} onChange={(event) => change(index, "current", event.target.checked)} />{currentLabel}</label>
+              <button type="button" onClick={() => write(rows.filter((_, i) => i !== index))} className="text-xs font-semibold text-rose-300 hover:text-rose-200">Remove</button>
+            </div>
+          </div>
+        ))}
+        <button type="button" onClick={() => write([...rows, {}])} className="rounded-xl border border-slate-600 bg-slate-900/30 px-4 py-2.5 text-sm font-semibold text-slate-200 transition hover:bg-slate-800/70">{addLabel}</button>
+      </div>
+    </Panel>
+  );
+}
+
 function ConfirmationSelect({ value, onChange }: { value: string; onChange: (value: string) => void }) {
   return <select className={inputClass} value={value} onChange={(event) => onChange(event.target.value)}><option value="needs_confirmation">Needs confirmation</option><option value="confirmed">Confirmed by me</option></select>;
 }
@@ -1136,8 +1203,9 @@ function calculateReadiness(profile: Profile | null) {
     profile.identityStatus === "confirmed",
     profile.locationStatus === "confirmed",
     profile.workHistoryStatus === "confirmed",
-    Boolean(profile.workAuthorization && !profile.workAuthorization.toLowerCase().includes("confirm")),
-    Boolean(profile.sponsorship && !profile.sponsorship.toLowerCase().includes("confirm")),
+    Boolean(profile.workAuthorized),
+    Boolean(profile.requiresSponsorship),
+    profile.workHistory.trim().length > 2,
     Boolean(profile.availability),
   ];
   return Math.round((checks.filter(Boolean).length / checks.length) * 100);

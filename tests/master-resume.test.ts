@@ -26,13 +26,13 @@ async function fixture(options: { signedIn?: boolean; extracted?: string; fail?:
     },
   };
   const code = ts.transpileModule(readFileSync(new URL('../app/api/master-resume/route.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
-  const module = new SourceTextModule(code);
-  await module.link(async (name) => {
+  const mod = new SourceTextModule(code);
+  await mod.link(async (name) => {
     const exports = modules[name]; if (!exports) throw new Error('Unexpected import ' + name);
     return new SyntheticModule(Object.keys(exports), function () { for (const [key, value] of Object.entries(exports)) this.setExport(key, value); });
   });
-  await module.evaluate();
-  const api = module.namespace as unknown as { GET(): Promise<Response>; POST(r: Request): Promise<Response>; PUT(r: Request): Promise<Response> };
+  await mod.evaluate();
+  const api = mod.namespace as unknown as { GET(): Promise<Response>; POST(r: Request): Promise<Response>; PUT(r: Request): Promise<Response> };
   return { api, state: () => ({ saved, writes, calls }) };
 }
 function pdfRequest(content = '%PDF-1.7 synthetic fixture', name = 'new.pdf') {
