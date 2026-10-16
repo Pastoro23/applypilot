@@ -68,8 +68,8 @@ async function run(advance) {
       ? "Moved to the next step. Open ApplyPilot again after it loads."
       : s.blockers.length
         ? `Filled ${s.filled} fields. Answer the highlighted questions.`
-        : `Filled ${s.filled} fields. Review, then continue safely.`;
-    $("#next").disabled = !!s.blockers.length || s.final;
+        : `Filled ${s.filled} fields. ${s.nextNote || "Review, then continue safely."}`;
+    $("#next").disabled = !!s.blockers.length || s.final || !s.canAdvance;
   } catch (e) {
     $("#result").textContent = e.message || "This page could not be processed.";
   } finally {
@@ -172,6 +172,8 @@ async function assistant(data, savedResume, advance) {
       .replace(/\s+/g, " ")
       .trim();
     if (!t) return null;
+    // Hedged or unconfirmed wording is never turned into a Yes or No.
+    if (/not sure|unsure|don'?t know|do not know|unknown|uncertain|unclear|maybe|depends|confirm|\btbd\b|\?/.test(t)) return null;
     if (/^(yes|y|true)$/.test(t)) return true;
     if (/^(no|n|false)$/.test(t)) return false;
     const n = no.test(t),
@@ -190,6 +192,47 @@ async function assistant(data, savedResume, advance) {
     /\b(require|need)s?\b|\bsponsorship required\b/,
     /\b(not|never|don't|doesn't|won't|will not|do not|does not)\s+(require|need)|\bwithout sponsorship|\bno sponsorship( needed| required)?/,
   );
+  // The question itself (label or legend), without the answer options, so "No, I need a visa" doesn't
+  // change how the question is read.
+  const question = (f) => {
+    const g = f.closest("fieldset,[role=radiogroup],[role=group],.form-group,.question,[data-automation-id*=formField]");
+    if (!g) {
+      const t = (f.type || "").toLowerCase();
+      if (["radio", "checkbox"].includes(t)) return "";
+      return [...(f.labels ? Array.from(f.labels).map((x) => x.textContent || "") : []), f.getAttribute("aria-label") || ""]
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLowerCase();
+    }
+    const optionLabels = [];
+    g.querySelectorAll("input[type=radio],input[type=checkbox]").forEach((x) => optionLabels.push(...Array.from(x.labels || [])));
+    const w = document.createTreeWalker(g, NodeFilter.SHOW_TEXT);
+    let s = "";
+    for (let n; (n = w.nextNode()); ) {
+      if (n.parentElement?.closest("option,select,script,style")) continue;
+      if (optionLabels.some((l) => l.contains(n))) continue;
+      s += " " + n.textContent;
+    }
+    return s.replace(/\s+/g, " ").trim().slice(0, 240).toLowerCase();
+  };
+  // Answers depend on how the question is worded: "Can you work WITHOUT sponsorship?" flips the answer.
+  // Anything that isn't clearly one of the known shapes goes to the user.
+  const eligibility = (q, aQ, sQ) => {
+    if (sQ) {
+      if (/without (\w+ ){0,3}sponsor|no (\w+ ){0,2}sponsor|not (require|need)\w* (\w+ ){0,3}sponsor/.test(q)) {
+        if (needsSponsor === null) return null;
+        if (!aQ) return !needsSponsor;
+        if (authorized === null) return null;
+        return authorized && !needsSponsor;
+      }
+      if (aQ || /\b(not|never|unable|cannot|can't)\b/.test(q)) return null;
+      if (/\b(require|need)\w*\b.*\bsponsor|\bsponsor\w*\b.*\b(require|need)/.test(q)) return needsSponsor;
+      return null;
+    }
+    if (/\b(not|never|unable|cannot|can't)\b|unauthori/.test(q)) return null;
+    return authorized;
+  };
   const skills = Array.isArray(data.skills)
     ? data.skills
         .map((x) => String(x).trim())
@@ -313,35 +356,73 @@ async function assistant(data, savedResume, advance) {
     ["city", /city/i],
     ["state", /state|province/i],
   ];
-  const fillRecord = (root, r) => {
-    let n = 0;
+  // One gate for every filler, so section filling can never touch what the main loop would refuse.
+  const allowed = (f) => {
+    const t = (f.type || "").toLowerCase();
+    return (
+      !f.disabled &&
+      !f.readOnly &&
+      !["hidden", "password", "submit", "button", "reset", "image"].includes(t) &&
+      !sensitive.test(desc(f))
+    );
+  };
+  // A "current job" box is recognised by its own label only, never by surrounding section text.
+  const isCurrentBox = (f) =>
+    (f.type || "").toLowerCase() === "checkbox" && own(f).some((x) => /current|present|still work/i.test(x));
+  // Fields are walked in page order. When a field type repeats (a second "Company"), the next record starts,
+  // so several entries inside one section each get their own record.
+  const fillRecords = (root, records, start) => {
+    let i = start,
+      seen = new Set(),
+      n = 0;
     for (const f of root.querySelectorAll("input,select,textarea")) {
-      if (!empty(f) || f.disabled || f.readOnly) continue;
-      const m = match(f, recordFields);
-      const v = !m || (r.current && /^end/.test(m[0])) ? "" : String(r[m[0]] ?? "").trim();
+      if (!allowed(f)) continue;
+      const t = (f.type || "").toLowerCase();
+      const key = isCurrentBox(f) ? "current" : ["checkbox", "radio", "file"].includes(t) ? null : match(f, recordFields)?.[0];
+      if (!key) continue;
+      if (seen.has(key)) {
+        i++;
+        seen = new Set();
+      }
+      seen.add(key);
+      const r = records[i];
+      if (!r) break;
+      if (!empty(f)) continue;
+      if (key === "current") {
+        if (r.current && !f.checked) {
+          f.click();
+          mark(f, "#2f7df6");
+          n++;
+        }
+        continue;
+      }
+      const v = r.current && /^end/.test(key) ? "" : String(r[key] ?? "").trim();
       if (v && set(f, v)) n++;
     }
-    const c = Array.from(root.querySelectorAll("input[type=checkbox]")).find((f) =>
-      /current|present|still work/i.test(desc(f)),
-    );
-    if (r.current && c && !c.checked) {
-      c.click();
-      mark(c, "#2f7df6");
-      n++;
+    return { n, next: seen.size ? i + 1 : i };
+  };
+  const fillSections = (roots, records) => {
+    let n = 0,
+      at = 0;
+    for (const root of roots) {
+      if (at >= records.length) break;
+      const r = fillRecords(root, records, at);
+      n += r.n;
+      at = r.next;
     }
     return n;
   };
-  const fillSections = (kind, records) => {
-    const roots = sectionRoots(kind);
-    let n = 0;
-    for (let i = 0; i < Math.min(roots.length, records.length); i++) n += fillRecord(roots[i], records[i]);
-    return n;
-  };
-  filled += fillSections("work experience|employment|work history", data.workHistory || []);
-  filled += fillSections("education|school", data.education || []);
+  const recordRoots = [
+    ...sectionRoots("work experience|employment|work history"),
+    ...sectionRoots("education|school"),
+  ];
+  filled += fillSections(sectionRoots("work experience|employment|work history"), data.workHistory || []);
+  filled += fillSections(sectionRoots("education|school"), data.education || []);
   for (const f of document.querySelectorAll("input,select,textarea")) {
     const t = (f.type || "").toLowerCase();
-    if (f.disabled || f.readOnly || ["hidden", "password", "submit", "button", "reset"].includes(t)) continue;
+    if (f.disabled || f.readOnly || ["hidden", "password", "submit", "button", "reset", "image"].includes(t)) continue;
+    // Job and school fields belong to their records; never fill them with home address or contact details.
+    if (recordRoots.some((r) => r.contains(f)) && match(f, recordFields)) continue;
     const d = desc(f);
     if (sensitive.test(d)) {
       if (empty(f) && required(f)) blockers.push(d.slice(0, 90) || "Sensitive question");
@@ -374,12 +455,13 @@ async function assistant(data, savedResume, advance) {
       if (set(f, skills)) filled++;
       continue;
     }
-    if (/authori[sz]ed|legally.*work|work.*authori[sz]ation/i.test(d)) {
-      if (authorized === null) blockers.push("Work authorization: answer this yourself");
-      else if (choice(f, authorized ? "yes" : "no")) filled++;
-    } else if (/sponsor|visa/i.test(d)) {
-      if (needsSponsor === null) blockers.push("Visa sponsorship: answer this yourself");
-      else if (choice(f, needsSponsor ? "yes" : "no")) filled++;
+    const q = question(f);
+    const aQ = /authori[sz]ed|authori[sz]ation|legally.*work|eligible to work|right to work/.test(q);
+    const sQ = /sponsor|visa/.test(q);
+    if (aQ || sQ) {
+      const a = eligibility(q, aQ, sQ);
+      if (a === null) blockers.push(sQ ? "Visa sponsorship: answer this yourself" : "Work authorization: answer this yourself");
+      else if (choice(f, a ? "yes" : "no")) filled++;
     }
   }
   for (const f of document.querySelectorAll("input,select,textarea"))
@@ -388,20 +470,44 @@ async function assistant(data, savedResume, advance) {
       if (!blockers.includes(label)) blockers.push(label);
       mark(f, "#f5b84b");
     }
+  const label = (b) => (b.textContent || b.value || b.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim();
+  const visible = (b) => {
+    const r = b.getBoundingClientRect(),
+      st = getComputedStyle(b);
+    return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none";
+  };
+  // A control that submits a form could be the final submission whatever its label says.
+  const submitsForm = (b) => {
+    if (b.tagName === "INPUT") return ["submit", "image"].includes((b.type || "").toLowerCase());
+    if (b.tagName === "BUTTON") return (b.getAttribute("type") || "submit").toLowerCase() === "submit" && !!b.form;
+    return false;
+  };
   const buttons = Array.from(
-    document.querySelectorAll("button,input[type=submit],input[type=button],a[role=button]"),
-  );
-  const final = buttons.find((b) =>
-    /submit application|^submit$|apply now/i.test((b.textContent || b.value || "").trim()),
-  );
-  const next = buttons.find((b) =>
-    /^(next|continue|save and continue|review)$/i.test((b.textContent || b.value || "").trim()),
-  );
-  let advanced = false;
-  if (advance && !blockers.length && next && !final) {
-    next.click();
+    document.querySelectorAll("button,input[type=submit],input[type=button],input[type=image],a[role=button],[role=button]"),
+  ).filter((b) => visible(b) && !b.disabled && b.getAttribute("aria-disabled") !== "true");
+  const final = buttons.find((b) => /submit|apply now|send application|finish|complete application/i.test(label(b)));
+  const finalCues =
+    /review (and|&) submit|by (clicking|submitting)|electronic signature|i (hereby )?(certify|attest)|submit (your|my) application/i.test(
+      (document.body?.innerText || "").slice(0, 20000),
+    );
+  const nexts = buttons.filter((b) => /^(next|continue|save and continue|save & continue)$/i.test(label(b)));
+  let advanced = false,
+    nextNote = "";
+  if (final || finalCues) nextNote = "This looks like the last step. Review it and submit yourself.";
+  else if (nexts.length !== 1) nextNote = nexts.length ? "Several Next buttons found. Move on yourself." : "No Next button found.";
+  else if (submitsForm(nexts[0])) nextNote = "This Next button sends the form, so press it yourself after checking.";
+  else if (advance && !blockers.length) {
+    nexts[0].click();
     advanced = true;
   }
   if (final) mark(final, "#f5b84b");
-  return { filled, blockers: [...new Set(blockers)], resumeAttached, advanced, final: !!final };
+  return {
+    filled,
+    blockers: [...new Set(blockers)],
+    resumeAttached,
+    advanced,
+    final: !!(final || finalCues),
+    canAdvance: !nextNote,
+    nextNote,
+  };
 }
