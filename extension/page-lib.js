@@ -3,7 +3,7 @@
 // assistant() is the popup's manual mode and never presses Submit. The batch runner uses the rest; only
 // pressSubmit() ever clicks a Submit button, once, after the rules that can be checked in the page hold again.
 (() => {
-  const VERSION = "3.0.0";
+  const VERSION = "3.1.0";
   const previous = globalThis.__applypilot;
   if (previous && previous.version === VERSION) return;
 
@@ -136,7 +136,7 @@
     const w = document.createTreeWalker(g, NodeFilter.SHOW_TEXT);
     let s = "";
     for (let n; (n = w.nextNode()); ) {
-      if (n.parentElement?.closest("option,select,script,style")) continue;
+      if (n.parentElement?.closest("option,select,script,style,[role=log],[role=listbox]")) continue;
       if (own.some((l) => l.contains(n))) continue;
       s += " " + n.textContent;
     }
@@ -261,18 +261,24 @@
     }
     return false;
   };
+  // A section is named by its aria-label, legend or heading, or by a header block that says only the section's name
+  // (Greenhouse's newer form puts "<p>Education</p>" in a div of class "education--header").
+  const headerNamed = (x, kind) =>
+    new RegExp(`^(${kind})$`, "i").test((x.querySelector(":scope > [class*='header' i]")?.textContent || "").replace(/\s+/g, " ").trim());
   const sectionRoots = (kind) =>
     Array.from(document.querySelectorAll("fieldset,[role=group],section,div"))
       .filter(
         (x) =>
-          new RegExp(kind, "i").test(
+          (new RegExp(kind, "i").test(
             (
               x.getAttribute("aria-label") ||
               x.querySelector(":scope > legend,:scope > h1,:scope > h2,:scope > h3,:scope > h4")
                 ?.textContent ||
               ""
             ).trim(),
-          ) && x.querySelector("input,select,textarea"),
+          ) ||
+            headerNamed(x, kind)) &&
+          x.querySelector("input,select,textarea"),
       )
       .filter(
         (x, i, a) =>
@@ -280,14 +286,15 @@
             (y, j) =>
               j !== i &&
               x.contains(y) &&
-              new RegExp(kind, "i").test(
+              (new RegExp(kind, "i").test(
                 (
                   y.getAttribute("aria-label") ||
                   y.querySelector(":scope > legend,:scope > h1,:scope > h2,:scope > h3,:scope > h4")
                     ?.textContent ||
                   ""
                 ).trim(),
-              ),
+              ) ||
+                headerNamed(y, kind)),
           ),
       );
   // One gate for every filler, so section filling can never touch what the main loop would refuse.
@@ -802,7 +809,8 @@
     for (let e = el.parentElement; e; e = e.parentElement) if (Number(getComputedStyle(e).opacity) === 0) return false;
     return true;
   }
-  function textOf(el, skip = "select,option,textarea,script,style,[role=listbox],[role=option]") {
+  // A dropdown's screen-reader log ("244 results found") is never part of a label or question. Alerts still count.
+  function textOf(el, skip = "select,option,textarea,script,style,[role=listbox],[role=option],[role=log]") {
     if (!el) return "";
     let s = "";
     const w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
@@ -907,6 +915,16 @@
     f.getAttribute("role") === "combobox" ||
     f.getAttribute("aria-haspopup") === "listbox" ||
     f.getAttribute("aria-autocomplete") === "list";
+  // react-select keeps a hidden, untabbable copy of a dropdown's value for the browser's required check. The
+  // dropdown beside it is what gets filled and checked, so the copy is never a question of its own.
+  function comboProxy(f) {
+    if (f.tagName !== "INPUT" || f.getAttribute("aria-hidden") !== "true" || f.tabIndex !== -1 || isCombo(f)) return false;
+    for (let e = f.parentElement, i = 0; e && i < 3; e = e.parentElement, i++) {
+      const combos = e.querySelectorAll("[role=combobox]");
+      if (combos.length) return combos.length === 1;
+    }
+    return false;
+  }
   const isButtonLike = (b) => b.matches("button,input[type=submit],input[type=button],input[type=image],input[type=reset],[role=button]");
   function btnLabel(b) {
     const t = b.tagName === "INPUT" ? b.value || b.getAttribute("aria-label") : b.innerText || b.getAttribute("aria-label") || b.textContent;
@@ -1178,10 +1196,12 @@
   async function findForm({ ats, timeoutMs = 20000 } = {}) {
     const adapter = adapterFor(ats);
     let res = null;
+    // A server-rendered form (Greenhouse's newer boards) is in the page before its scripts take it over. Values typed
+    // before then can be wiped by the first re-render, so the page must have finished loading first.
     await waitFor(
       () => {
         res = locate(adapter);
-        if (res?.root) return true;
+        if (res?.root) return document.readyState === "complete";
         if (CLOSED.test(pageText())) {
           res = { reason: "closed" };
           return true;
@@ -1269,6 +1289,86 @@
     }
     return [...new Set(out)];
   }
+  // Where you live, asked as a question. Read whole, so any other question that mentions a country or state (where
+  // you'd work, a visa, an office) is left alone. The state question may add one sentence for people outside the U.S.
+  const US_WORD = "(the )?(united states( of america)?|u\\.?s\\.?a?\\.?)";
+  const LIVES = "(a resident of|resident in|reside in|residing in|live in|living in|located in|based in)";
+  const RES_COUNTRY = new RegExp(`^(what|which|in which) country (are|do) you (currently |presently )?${LIVES}$|^(what is |please (select|confirm|provide|enter) )?(your )?(current )?country of residence$`);
+  const RES_STATE = new RegExp(
+    `^((if you are (currently )?(based|located|living|residing) in ${US_WORD},? )?(please )?(confirm|select|provide|enter|choose|indicate) )?(your )?(current )?(u\\.?s\\.? )?state of residence$|^(what|which|in which) (u\\.?s\\.? )?state (are|do) you (currently |presently )?${LIVES}$`,
+  );
+  const OUTSIDE_US = new RegExp(
+    `^if you are (currently )?(based|located|living|residing) outside (of )?${US_WORD},? (please )?(select|choose|pick) "?i am not (currently )?(located|based|living|residing) in ${US_WORD}"?$`,
+  );
+  const NOT_IN_US = new RegExp(`^i am not (currently )?(located|based|living|residing) in ${US_WORD}$`);
+  function residenceQuestion(f) {
+    const text = norm([...new Set(labelEls(f))].map((l) => textOf(l)).join(" ") || f.getAttribute("aria-label"))
+      .toLowerCase()
+      .replace(/[\u201c\u201d]/g, '"')
+      .replace(/[\s*:✱]+$/, "");
+    const [first, ...rest] = text.split(/(?<=[.?])\s+/).map((x) => x.replace(/[.?]+$/, "").trim());
+    if (rest.length > 1 || (rest.length && !OUTSIDE_US.test(rest[0]))) return null;
+    if (RES_COUNTRY.test(first) && !rest.length) return "country";
+    if (RES_STATE.test(first)) return "state";
+    return null;
+  }
+  // A box that only acknowledges reading a privacy policy or notice ("Please acknowledge that you have read and agree to
+  // our Privacy Policy." with one "Yes" box). Every word must come from this short list, so a box that also certifies
+  // answers, accepts terms, consents to contact or sharing, or says anything else stays with you.
+  const PRIVACY_ACK_WORDS = new Set(
+    `please acknowledge acknowledged confirm that i you have has i've you've read reviewed and understand understood
+    agree accept to the our this privacy policy notice statement applicant candidate recruitment recruiting job yes by
+    checking box ticking tick check here`.split(/\s+/),
+  );
+  function privacyAckBox(f, root, company = "") {
+    if (f.tagName !== "INPUT" || typeOf(f) !== "checkbox" || checkGroup(f, root).length !== 1) return false;
+    let text = [textOf(groupLabelEl(f)), ...[...new Set(labelEls(f))].map((l) => textOf(l))]
+      .join(" ")
+      .toLowerCase()
+      .replace(/[\u2018\u2019]/g, "'");
+    const co = norm(company).toLowerCase();
+    if (co) text = text.split(`${co}'s`).join("the");
+    // One possessive name right before the policy ("Invisible's Privacy Policy") reads as "the".
+    text = text.replace(/(^|\s)[a-z0-9&.-]+'s (?=privacy (policy|notice)\b)/g, "$1the ");
+    if (!/\bprivacy (policy|notice)\b/.test(text)) return false;
+    const words = text.replace(/[*✱.,:;!"()]/g, " ").split(/\s+/).filter(Boolean);
+    return words.length > 0 && words.every((w) => PRIVACY_ACK_WORDS.has(w));
+  }
+  const inUS = (country) => variants("country", country).includes("united states");
+  // A phone country picker shows the dialling code after each name ("United States +1").
+  const dialless = (t) => t.replace(/\s*\(?\+\d{1,4}\)?$/, "");
+
+  // Education dropdowns name the degree from a fixed list. Your credential's own words pick exactly one kind, or none.
+  const DEGREE_KINDS = [
+    ["phd", /\b(ph\.? ?d\.?|doctor(ate)? of philosophy)(?![a-z])/, /^(doctor of philosophy|ph\.? ?d)\b/],
+    ["mba", /\b(m\.? ?b\.? ?a\.?|master of business administration)(?![a-z])/, /^(master of business administration|m\.?b\.?a)\b/],
+    ["master", /\b(master'?s?|m\.s\.?|m\.a\.?|ms|ma|msc|m\.sc\.?|m\.ed\.?)(?![a-z])/, /^master'?s( degree)?$/],
+    ["bachelor", /\b(bachelor'?s?|b\.s\.?|b\.a\.?|bs|ba|bsc|b\.sc\.?|bba|b\.b\.a\.?)(?![a-z])/, /^bachelor'?s( degree)?$/],
+    ["associate", /\b(associate'?s?|a\.a\.s\.?|a\.a\.?|a\.s\.?|aas|a\.a\.t\.?)(?![a-z])/, /^associate'?s( degree)?$/],
+    ["high school", /\b(high school|ged|secondary school)(?![a-z])/, /^high school( diploma)?$/],
+  ];
+  function degreeKind(credential) {
+    const t = norm(credential).toLowerCase().replace(/[\u2018\u2019]/g, "'");
+    let kinds = DEGREE_KINDS.filter(([, words]) => words.test(t)).map(([k]) => k);
+    if (kinds.includes("mba")) kinds = kinds.filter((k) => k !== "master");
+    if (kinds.includes("phd")) kinds = kinds.filter((k) => k !== "master");
+    return kinds.length === 1 ? DEGREE_KINDS.find(([k]) => k === kinds[0])[2] : null;
+  }
+  // The field of study: the record's own field, else what follows "in" ("Bachelor of Science in Computer Science") or
+  // a leading abbreviation ("A.A.S. Information Technology").
+  function studyField(r) {
+    const field = norm(r.field);
+    if (field) return field;
+    const d = norm(r.degree);
+    const m = d.match(/\bin\s+(.+)$/i) || d.match(/^(?:[a-z]{1,4}\.){1,4}\s+(.+)$/i) || d.match(/^(?:aas|aa|as|bs|ba|bsc|ms|ma|msc|mba)\s+(.+)$/i);
+    return m ? norm(m[1]) : "";
+  }
+  const EDU_COMBOS = [
+    ["school", /^(school|university|college|institution)( name)?$/],
+    ["degree", /^degree( type| level)?$/],
+    ["field", /^(discipline|field of study|major|area of study)$/],
+  ];
+
   const MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
   // A work or education record value as a select may show it: a month as its number, name or short name, a degree
   // with " degree" after it ("Bachelor's" is "Bachelor's Degree").
@@ -1489,7 +1589,7 @@
     return fixed;
   }
 
-  async function fill({ profile, resume, coverLetter = "", ats, company = "", usPosting = false } = {}) {
+  async function fill({ profile, resume, coverLetter = "", ats, company = "", usPosting = false, allowPrivacyAck = false } = {}) {
     const out = { filled: [], blockers: [], resumeInputPath: "" };
     state.fillFlagged = [];
     const block = (code, label, el) => {
@@ -1529,10 +1629,16 @@
       edu = sectionRoots(EDU).filter((r) => root.contains(r));
     const recordRoots = [...work, ...edu];
     const onRecord = (f, v) => record(f, "record", v);
-    const strict = { isCurrent: strictCurrentBox, put: (f, key, v) => (f.tagName === "SELECT" ? setSelectStrict(f, recordVariants(key, v), "record") : set(f, v)) };
+    // A year box takes only a four-digit year. Dropdowns in a record are chosen below, one exact option at a time.
+    const strict = {
+      isCurrent: strictCurrentBox,
+      put: (f, key, v) =>
+        f.tagName === "SELECT" ? setSelectStrict(f, recordVariants(key, v), "record") : /Year$/.test(key) && !/^\d{4}$/.test(v) ? false : set(f, v),
+    };
+    const recordSkip = (f) => untouchable(f) || isCombo(f);
     // The batch gate is wider than the manual one, so a record field asking about you personally is still left alone.
-    fillSections(work, p.workHistory || [], onRecord, untouchable, strict);
-    fillSections(edu, p.education || [], onRecord, untouchable, strict);
+    fillSections(work, p.workHistory || [], onRecord, recordSkip, strict);
+    fillSections(edu, p.education || [], onRecord, recordSkip, strict);
 
     // 3-7. Text fields, native selects and radios, matched on each field's own label only.
     const authorized = typeof p.workAuthorized === "boolean" ? p.workAuthorized : null;
@@ -1555,7 +1661,7 @@
       doneRadios = new Set();
     for (const f of root.querySelectorAll("input,select,textarea")) {
       const t = typeOf(f);
-      if (f.disabled || f.readOnly || ["hidden", "password", "submit", "button", "reset", "image", "file", "checkbox"].includes(t)) continue;
+      if (f.disabled || f.readOnly || comboProxy(f) || ["hidden", "password", "submit", "button", "reset", "image", "file", "checkbox"].includes(t)) continue;
       // Records never use radios, so a Yes/No question whose legend says "employment" (and so reads as a work
       // section) is still answered here.
       if (t !== "radio" && recordRoots.some((r) => r.contains(f)) && match(f, recordFields)) continue;
@@ -1613,10 +1719,22 @@
       const lt = labelTexts(f).join(" ");
       if (forSomeoneElse(f, root)) continue;
       const m = profileField(f);
+      const lives = m ? null : residenceQuestion(f);
       let wants = null,
-        source = "profile";
-      if (m && (m[0] === "country" || m[0] === "state")) wants = variants(m[0], p[m[0]]);
-      else if (!m || m[0] === "city") {
+        source = "profile",
+        typed = "",
+        accept = null;
+      if (lives === "state" && norm(p.country) && !inUS(p.country)) {
+        typed = "not";
+        accept = (t) => NOT_IN_US.test(t.toLowerCase());
+      } else if ((m && (m[0] === "country" || m[0] === "state")) || lives) {
+        const key = m ? m[0] : lives;
+        wants = variants(key, p[key]);
+        const st = key === "state" ? stateCode(p.state) : "";
+        // A state is typed by its name: "GA" would also find "Michigan".
+        typed = st ? US_STATES[st] : norm(p[key]);
+        accept = (t) => wants.includes(dialless(t).toLowerCase());
+      } else if (!m || m[0] === "city") {
         const a = answerFor(question(f) || lt.toLowerCase());
         if (typeof a === "boolean") {
           wants = [a ? "yes" : "no"];
@@ -1626,12 +1744,64 @@
           continue;
         }
       }
-      if (!wants?.length) continue;
-      const typed = norm(m ? p[m[0]] : wants[0]);
-      const ok = await chooseOption(f, typed || wants[0], (t) => wants.includes(t.toLowerCase()));
+      if (!accept) {
+        if (!wants?.length) continue;
+        accept = (t) => wants.includes(t.toLowerCase());
+        typed = wants[0];
+      } else if (!typed) continue;
+      const ok = await chooseOption(f, typed, accept);
       if (ok) record(f, source);
       else if (isRequired(f)) block("unanswered_required", labelOf(f), f);
     }
+
+    // 5b. Education dropdowns: the degree kind, the field of study and the school, each one exact option or none.
+    {
+      let i = 0,
+        seen = new Set();
+      for (const f of edu.flatMap((r) => Array.from(r.querySelectorAll("input")))) {
+        if (!isCombo(f) || !allowed(f) || untouchable(f)) continue;
+        const key = profileField(f, EDU_COMBOS)?.[0];
+        if (!key) continue;
+        if (seen.has(key)) {
+          i++;
+          seen = new Set();
+        }
+        seen.add(key);
+        const r = (p.education || [])[i];
+        if (!r || typeof r !== "object") break;
+        if (comboValue(f)) continue;
+        const clean = (t) => norm(t).toLowerCase().replace(/[\u2018\u2019]/g, "'");
+        let typed = "",
+          accept = null;
+        if (key === "degree") {
+          const kind = degreeKind(r.degree);
+          if (kind) {
+            typed = clean(kind.source.match(/[a-z]{4,}/)?.[0] || "");
+            accept = (t) => kind.test(clean(t));
+          }
+        } else {
+          const want = clean(key === "field" ? studyField(r) : r.school);
+          if (want) {
+            typed = want;
+            accept = (t) => clean(t) === want;
+          }
+        }
+        if (!accept || !typed) continue;
+        if (await chooseOption(f, typed, accept)) record(f, "record");
+        else if (key !== "school" && isRequired(f)) block("unanswered_required", labelOf(f), f);
+      }
+    }
+
+    // 5c. A required box that only acknowledges a privacy policy, when you've allowed it in Extension settings.
+    if (allowPrivacyAck)
+      for (const f of root.querySelectorAll("input[type=checkbox]")) {
+        if (f.checked || f.disabled || !privacyAckBox(f, root, company) || !(isRequired(f) || groupRequired(f)) || !safeToClick(f)) continue;
+        f.click();
+        if (f.checked) {
+          mark(f, "#2f7df6");
+          record(f, "privacy_ack", "1");
+        }
+      }
 
     // 6. Yes/No button pairs; the pressed state must be readable before and after the click.
     for (const pair of choicePairs(root)) {
@@ -1654,7 +1824,7 @@
         !!st &&
         (await chooseOption(
           f,
-          `${city}, ${st}`,
+          city,
           (t) => starts(t) && (hasWord(t, st) || hasWord(t, US_STATES[st])),
           (v) => starts(v),
         ));
@@ -1662,11 +1832,11 @@
       else block("unanswered_required", labelOf(f), f);
     }
 
-    // 9. Identity pass: a resume parser may have rewritten name, email or phone.
-    await quiet(root, 1000, 5000);
-    if (identityPass(root, p, recordRoots)) {
-      await quiet(root, 1000, 4000);
-      identityPass(root, p, recordRoots);
+    // 9. Identity pass: a resume parser may have rewritten name, email or phone, or a page that re-rendered after the
+    // dropdowns above may have cleared them. One more look after the page settles catches a late change.
+    for (let pass = 0; pass < 3; pass++) {
+      await quiet(root, pass === 2 ? 1500 : 1000, pass === 2 ? 6000 : 5000);
+      if (!identityPass(root, p, recordRoots) && pass > 0) break;
     }
 
     out.filled = Array.from(state.filled.values(), ({ label, type, required, value, source }) => ({ label, type, required, value, source })).slice(0, 60);
@@ -1679,7 +1849,7 @@
     const out = [],
       seen = new Set();
     for (const f of root.querySelectorAll("input,select,textarea,[role=combobox]:not(input),[role=checkbox]:not(input),[role=switch]")) {
-      if (seen.has(f)) continue;
+      if (seen.has(f) || comboProxy(f)) continue;
       const t = typeOf(f);
       if (["hidden", "submit", "button", "reset", "image", "password"].includes(t)) continue;
       const options =
@@ -1911,6 +2081,7 @@
     const adapter = adapterFor(job?.ats);
     const allowInvisible = settings?.allowInvisibleCaptcha !== false;
     const allowOptional = settings?.allowOptionalSensitiveBlank !== false;
+    const allowPrivacy = settings?.allowPrivacyAck !== false;
     const blockers = [],
       flagged = [],
       relax = new Set();
@@ -1974,6 +2145,11 @@
               : attestationControl(u.first);
       if (attest) {
         u.skip = true;
+        // A privacy-policy box ApplyPilot ticked under your setting is listed with the submission, not sent to you.
+        if (allowPrivacy && u.kind === "check" && u.els.length === 1 && !isEmpty && privacyAckBox(u.first, root, job?.company) && state.filled.get(u.first)?.source === "privacy_ack") {
+          relax.add("privacy_ack");
+          continue;
+        }
         // An unticked optional consent box is fine; a typed signature or name always goes to you.
         const typed = u.kind === "single" && TEXTLIKE.includes(typeOf(u.first)) && !isCombo(u.first);
         if (typed || req || !isEmpty) add("attestation", unitLabel(u), u.first);

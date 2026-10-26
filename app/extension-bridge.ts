@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Batch } from "./send-batch";
 import type { ClaimResult, SubmissionRow } from "./submission-store";
 
-// Talks to Application Assistant 3.0 through its content script on this page (window.postMessage, same origin only).
+// Talks to Application Assistant 3.1 through its content script on this page (window.postMessage, same origin only).
 // The page makes every server call itself, so the extension never needs this site's cookies.
 
 const CHANNEL = "applypilot";
@@ -11,7 +11,7 @@ const REQUEST_TIMEOUT_MS = 20_000;
 const BATCH_TIMEOUT_MS = 90_000; // Chrome re-hashes every PDF before it accepts a batch
 const RESULTS_CHUNK = 20;
 const REFRESH_DELAY_MS = 1500;
-const NOT_CONNECTED = "Application Assistant 3.0 isn't connected. Open this page in Chrome on your Mac with it installed.";
+const NOT_CONNECTED = "Application Assistant 3.1 isn't connected. Open this page in Chrome on your Mac with it installed.";
 const NO_ANSWER = "Chrome didn't answer. Reload the extension and try again.";
 
 type Envelope = {

@@ -92,7 +92,7 @@ function calibrate(sqlite: DatabaseSync, ats: string, n = 3) {
 const calibration = async (db: ReturnType<typeof testDatabase>['db']) => (await submissionsPage(db, OWNER, NOW + HOUR)).calibration;
 
 const settings = (extra: Record<string, unknown> = {}) => ({
-  auto: { greenhouse: false, lever: false, ashby: false }, dailyCap: 10, allowInvisibleCaptcha: true, allowOptionalSensitiveBlank: true, ...extra,
+  auto: { greenhouse: false, lever: false, ashby: false }, dailyCap: 10, allowInvisibleCaptcha: true, allowOptionalSensitiveBlank: true, allowPrivacyAck: true, ...extra,
 });
 
 test('approve requires a confirmed profile', async () => {
@@ -341,6 +341,20 @@ test('default settings let invisible CAPTCHA markers and optional sensitive ques
   assert.equal((sqlite.prepare('SELECT relaxations FROM submissions WHERE id = ?').get(item.approvalId) as { relaxations: string }).relaxations,
     'invisible_captcha,optional_sensitive_blank');
   await assert.rejects(saveSettings(db, OWNER, settings({ dailyCap: 26 }), NOW), UserFacingError);
+});
+
+test('a privacy-policy box ticked under the setting is claimed only while the setting is on', async () => {
+  const { sqlite, db } = setup();
+  addApp(sqlite, 'a1', ghUrl(1));
+  addApp(sqlite, 'a2', ghUrl(2));
+  const first = await approveOne(db, 'a1');
+  const second = await approveOne(db, 'a2');
+  assert.deepEqual(await claimSubmission(db, OWNER, claimOf(first, { relaxations: ['invisible_captcha', 'optional_sensitive_blank', 'privacy_ack'] }), NOW),
+    { ok: true, mode: 'supervised' });
+  await saveSettings(db, OWNER, settings({ allowPrivacyAck: false }), NOW);
+  assert.deepEqual(await claimSubmission(db, OWNER, claimOf(second, { relaxations: ['privacy_ack'] }), NOW), { ok: false, reason: 'setting_changed' });
+  assert.equal((await loadSettings(db, OWNER)).allowPrivacyAck, false);
+  await assert.rejects(saveSettings(db, OWNER, settings({ allowPrivacyAck: 'yes' }), NOW), UserFacingError);
 });
 
 test('results: duplicates are acked and applied once; stale attempts change nothing', async () => {

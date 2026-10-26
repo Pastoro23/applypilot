@@ -1,0 +1,357 @@
+<!doctype html>
+<!-- Greenhouse's newer (Remix, react-select) application form for scripts/test-extension.mjs. The form markup
+     is copied from a saved job page with the styles, icons and company details removed; the dropdowns are
+     driven by greenhouse-remix.js, a stand-in for react-select. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Job Application for Help Desk Technician at Acme Example</title>
+<style>
+  body { font: 15px/1.4 sans-serif; margin: 24px; }
+  .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .select__control { border: 1px solid #999; padding: 4px; min-height: 24px; }
+  .select__option { padding: 4px; }
+  input[aria-hidden=true][tabindex="-1"] { opacity: 0; height: 1px; width: 100%; position: absolute; pointer-events: none; }
+  .select__container { position: relative; }
+  .field-wrapper, .select { margin: 10px 0; }
+</style>
+</head>
+<body>
+<header><a href="/acme">Acme Example</a></header>
+<main>
+  <h1 class="job__title">Help Desk Technician</h1>
+  <p class="job__location">Atlanta, GA</p>
+<form method="post" action="/acme/jobs/4012345/applications" id="application-form" class="application--form" data-discover="true">
+<div class="application--questions">
+<div class="field-wrapper">
+<div class="text-input-wrapper">
+<div class="input-wrapper">
+<label id="first_name-label" for="first_name" class="label label">First Name<span aria-hidden="true">*</span>
+</label>
+<input id="first_name" class="input input__single-line" aria-label="First Name" aria-describedby="first_name-description first_name-error first_name-help" aria-invalid="false" aria-errormessage="first_name-error" aria-required="true" type="text" maxlength="255" autocomplete="given-name" value="">
+</div>
+</div>
+</div>
+<div class="field-wrapper">
+<div class="text-input-wrapper">
+<div class="input-wrapper">
+<label id="last_name-label" for="last_name" class="label label">Last Name<span aria-hidden="true">*</span>
+</label>
+<input id="last_name" class="input input__single-line" aria-label="Last Name" aria-describedby="last_name-description last_name-error last_name-help" aria-invalid="false" aria-errormessage="last_name-error" aria-required="true" type="text" maxlength="255" autocomplete="family-name" value="">
+</div>
+</div>
+</div>
+<div class="field-wrapper">
+<div class="text-input-wrapper">
+<div class="input-wrapper">
+<label id="email-label" for="email" class="label label">Email<span aria-hidden="true">*</span>
+</label>
+<input id="email" class="input input__single-line" aria-label="Email" aria-describedby="email-description email-error email-help" aria-invalid="false" aria-errormessage="email-error" aria-required="true" type="text" maxlength="255" autocomplete="email" value="">
+</div>
+</div>
+</div>
+<div>
+<fieldset class="phone-input">
+<legend class="visually-hidden">Phone</legend>
+<div class="phone-input__country">
+<div class="select">
+<div class="select__container">
+<label id="country-label" for="country" class="label select__label">Country<span aria-hidden="true">*</span>
+</label>
+<div class="select-shell ">
+<span id="react-select-country-live-region"></span>
+<span aria-live="polite" aria-atomic="false" aria-relevant="additions text" role="log"></span>
+<div>
+<div class="select__control ">
+<div class="select__value-container ">
+<div class="select__placeholder " id="react-select-country-placeholder">Select...</div>
+<div class="select__input-container " data-value="">
+<input class="select__input" autocapitalize="none" autocomplete="off" autocorrect="off" id="country" spellcheck="false" tabindex="0" type="text" aria-autocomplete="list" aria-expanded="false" aria-haspopup="true" aria-errormessage="country-error" aria-invalid="false" aria-labelledby="country-label" aria-required="true" role="combobox" aria-activedescendant="" aria-describedby="react-select-country-placeholder" enterkeyhint="done" value="">
+</div>
+</div>
+<div class="select__indicators ">
+<button type="button" class="icon-button icon-button--sm" aria-label="Toggle flyout" tabindex="-1">
+</button>
+</div>
+</div>
+</div>
+<input required="" tabindex="-1" aria-hidden="true" value="">
+</div>
+</div>
+</div>
+</div>
+<div class="phone-input__phone">
+<div class="text-input-wrapper">
+<div class="input-wrapper">
+<label id="phone-label" for="phone" class="label label">Phone<span aria-hidden="true">*</span>
+</label>
+<input id="phone" class="input input__single-line" aria-label="Phone" aria-describedby="phone-description phone-error phone-help" aria-invalid="false" aria-errormessage="phone-error" aria-required="true" type="tel" maxlength="255">
+</div>
+</div>
+</div>
+</fieldset>
+</div>
+<div class="field-wrapper">
+<div class="select">
+<div class="select__container">
+<label id="candidate-location-label" for="candidate-location" class="label select__label">Location (City)<span aria-hidden="true">*</span>
+</label>
+<div class="select-shell ">
+<span id="react-select-candidate-location-live-region"></span>
+<span aria-live="polite" aria-atomic="false" aria-relevant="additions text" role="log"></span>
+<div>
+<div class="select__control ">
+<div class="select__value-container ">
+<div class="select__placeholder " id="react-select-candidate-location-placeholder">Select...</div>
+<div class="select__input-container " data-value="">
+<input class="select__input" autocapitalize="none" autocomplete="off" autocorrect="off" id="candidate-location" spellcheck="false" tabindex="0" type="text" aria-autocomplete="list" aria-expanded="false" aria-haspopup="true" aria-errormessage="candidate-location-error" aria-invalid="false" aria-labelledby="candidate-location-label" aria-required="true" role="combobox" aria-activedescendant="" aria-describedby="react-select-candidate-location-placeholder" enterkeyhint="done" value="">
+</div>
+</div>
+<div class="select__indicators ">
+</div>
+</div>
+</div>
+<input required="" tabindex="-1" aria-hidden="true" value="">
+</div>
+</div>
+</div>
+<button type="button" class="btn--tertiary">Locate me</button>
+</div>
+<div class="field-wrapper">
+<div role="group" aria-labelledby="upload-label-resume" aria-required="true" class="file-upload" data-allow-s3="false">
+<div id="upload-label-resume" class="label upload-label">Resume/CV<span class="required">*</span>
+</div>
+<div class="file-upload__wrapper">
+<div class="button-container">
+<div class="secondary-button">
+<div>
+<button type="button" class="btn btn--pill">Attach</button>
+<label class="visually-hidden" for="resume">Attach</label>
+<input id="resume" class="visually-hidden" type="file" accept=".pdf,.doc,.docx,.txt,.rtf">
+</div>
+</div>
+<div class="secondary-button">
+<button type="button" class="btn btn--pill" data-testid="resume-dropbox">Dropbox</button>
+</div>
+<div class="secondary-button">
+<button type="button" class="btn btn--pill">Google Drive</button>
+</div>
+<div class="secondary-button">
+<div>
+<button type="button" class="btn btn--pill" data-testid="resume-text">Enter manually</button>
+<label class="visually-hidden" for="resume_text">Enter manually</label>
+</div>
+</div>
+<p id="accepted-filetypes" class="file-upload__filetypes">Accepted file types: pdf, doc, docx, txt, rtf</p>
+</div>
+</div>
+</div>
+</div>
+</div>
+<div class="education--container">
+<div class="education--form">
+<hr>
+<div class="education--header">
+<p class="body body--medium">Education</p>
+</div>
+<div class="select">
+<div class="select__container">
+<label id="school--0-label" for="school--0" class="label select__label">School</label>
+<div class="select-shell ">
+<span id="react-select-school--0-live-region"></span>
+<span aria-live="polite" aria-atomic="false" aria-relevant="additions text" role="log"></span>
+<div>
+<div class="select__control ">
+<div class="select__value-container ">
+<div class="select__placeholder " id="react-select-school--0-placeholder">Select...</div>
+<div class="select__input-container " data-value="">
+<input class="select__input" autocapitalize="none" autocomplete="off" autocorrect="off" id="school--0" spellcheck="false" tabindex="0" type="text" aria-autocomplete="list" aria-expanded="false" aria-haspopup="true" aria-errormessage="school--0-error" aria-invalid="false" aria-labelledby="school--0-label" aria-required="false" role="combobox" aria-activedescendant="" aria-describedby="react-select-school--0-placeholder" enterkeyhint="done" value="">
+</div>
+</div>
+<div class="select__indicators ">
+<button type="button" class="icon-button icon-button--sm" aria-label="Toggle flyout" tabindex="-1">
+</button>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+<div class="select">
+<div class="select__container">
+<label id="degree--0-label" for="degree--0" class="label select__label">Degree<span aria-hidden="true">*</span>
+</label>
+<div class="select-shell ">
+<span id="react-select-degree--0-live-region"></span>
+<span aria-live="polite" aria-atomic="false" aria-relevant="additions text" role="log"></span>
+<div>
+<div class="select__control ">
+<div class="select__value-container ">
+<div class="select__placeholder " id="react-select-degree--0-placeholder">Select...</div>
+<div class="select__input-container " data-value="">
+<input class="select__input" autocapitalize="none" autocomplete="off" autocorrect="off" id="degree--0" spellcheck="false" tabindex="0" type="text" aria-autocomplete="list" aria-expanded="false" aria-haspopup="true" aria-errormessage="degree--0-error" aria-invalid="false" aria-labelledby="degree--0-label" aria-required="true" role="combobox" aria-activedescendant="" aria-describedby="react-select-degree--0-placeholder" enterkeyhint="done" value="">
+</div>
+</div>
+<div class="select__indicators ">
+<button type="button" class="icon-button icon-button--sm" aria-label="Toggle flyout" tabindex="-1">
+</button>
+</div>
+</div>
+</div>
+<input required="" tabindex="-1" aria-hidden="true" value="">
+</div>
+</div>
+</div>
+<div class="select">
+<div class="select__container">
+<label id="discipline--0-label" for="discipline--0" class="label select__label">Discipline<span aria-hidden="true">*</span>
+</label>
+<div class="select-shell ">
+<span id="react-select-discipline--0-live-region"></span>
+<span aria-live="polite" aria-atomic="false" aria-relevant="additions text" role="log"></span>
+<div>
+<div class="select__control ">
+<div class="select__value-container ">
+<div class="select__placeholder " id="react-select-discipline--0-placeholder">Select...</div>
+<div class="select__input-container " data-value="">
+<input class="select__input" autocapitalize="none" autocomplete="off" autocorrect="off" id="discipline--0" spellcheck="false" tabindex="0" type="text" aria-autocomplete="list" aria-expanded="false" aria-haspopup="true" aria-errormessage="discipline--0-error" aria-invalid="false" aria-labelledby="discipline--0-label" aria-required="true" role="combobox" aria-activedescendant="" aria-describedby="react-select-discipline--0-placeholder" enterkeyhint="done" value="">
+</div>
+</div>
+<div class="select__indicators ">
+<button type="button" class="icon-button icon-button--sm" aria-label="Toggle flyout" tabindex="-1">
+</button>
+</div>
+</div>
+</div>
+<input required="" tabindex="-1" aria-hidden="true" value="">
+</div>
+</div>
+</div>
+<div class="education--half-width-container">
+<div class="education--date-container">
+<div class="text-input-wrapper">
+<div class="input-wrapper">
+<label id="start-year--0-label" for="start-year--0" class="label label">Start date year<span aria-hidden="true">*</span>
+</label>
+<input id="start-year--0" class="input input__single-line" aria-label="Start date year" aria-describedby="start-year--0-description start-year--0-error start-year--0-help" aria-invalid="false" aria-errormessage="start-year--0-error" aria-required="true" type="number">
+</div>
+</div>
+</div>
+<div class="education--date-container">
+<div class="text-input-wrapper">
+<div class="input-wrapper">
+<label id="end-year--0-label" for="end-year--0" class="label label">End date year<span aria-hidden="true">*</span>
+</label>
+<input id="end-year--0" class="input input__single-line" aria-label="End date year" aria-describedby="end-year--0-description end-year--0-error end-year--0-help" aria-invalid="false" aria-errormessage="end-year--0-error" aria-required="true" type="number">
+</div>
+</div>
+</div>
+</div>
+</div>
+<button class="add-another-button" type="button">Add another</button>
+</div>
+<div class="application--questions">
+<hr>
+<div class="field-wrapper">
+<div class="select">
+<div class="select__container">
+<label id="question_9601406101-label" for="question_9601406101" class="label select__label">What country are you currently a resident of?<span aria-hidden="true">*</span>
+</label>
+<div class="select-shell ">
+<span id="react-select-question_9601406101-live-region"></span>
+<span aria-live="polite" aria-atomic="false" aria-relevant="additions text" role="log"></span>
+<div>
+<div class="select__control ">
+<div class="select__value-container ">
+<div class="select__placeholder " id="react-select-question_9601406101-placeholder">Select...</div>
+<div class="select__input-container " data-value="">
+<input class="select__input" autocapitalize="none" autocomplete="off" autocorrect="off" id="question_9601406101" spellcheck="false" tabindex="0" type="text" aria-autocomplete="list" aria-expanded="false" aria-haspopup="true" aria-errormessage="question_9601406101-error" aria-invalid="false" aria-labelledby="question_9601406101-label" aria-required="true" role="combobox" aria-activedescendant="" aria-describedby="react-select-question_9601406101-placeholder" enterkeyhint="done" value="">
+</div>
+</div>
+<div class="select__indicators ">
+<button type="button" class="icon-button icon-button--sm" aria-label="Toggle flyout" tabindex="-1">
+</button>
+</div>
+</div>
+</div>
+<input required="" tabindex="-1" aria-hidden="true" value="">
+</div>
+</div>
+</div>
+</div>
+<div class="field-wrapper">
+<div class="select">
+<div class="select__container">
+<label id="question_9601407101-label" for="question_9601407101" class="label select__label">If you are currently based in United States, please confirm your current state of residence. If you are based outside of the United States, select "I am not located in the United States".<span aria-hidden="true">*</span>
+</label>
+<div class="select-shell ">
+<span id="react-select-question_9601407101-live-region"></span>
+<span aria-live="polite" aria-atomic="false" aria-relevant="additions text" role="log"></span>
+<div>
+<div class="select__control ">
+<div class="select__value-container ">
+<div class="select__placeholder " id="react-select-question_9601407101-placeholder">Select...</div>
+<div class="select__input-container " data-value="">
+<input class="select__input" autocapitalize="none" autocomplete="off" autocorrect="off" id="question_9601407101" spellcheck="false" tabindex="0" type="text" aria-autocomplete="list" aria-expanded="false" aria-haspopup="true" aria-errormessage="question_9601407101-error" aria-invalid="false" aria-labelledby="question_9601407101-label" aria-required="true" role="combobox" aria-activedescendant="" aria-describedby="react-select-question_9601407101-placeholder" enterkeyhint="done" value="">
+</div>
+</div>
+<div class="select__indicators ">
+<button type="button" class="icon-button icon-button--sm" aria-label="Toggle flyout" tabindex="-1">
+</button>
+</div>
+</div>
+</div>
+<input required="" tabindex="-1" aria-hidden="true" value="">
+</div>
+</div>
+</div>
+</div>
+<div class="field-wrapper">
+<div class="text-input-wrapper">
+<div class="input-wrapper">
+<label id="question_9601408101-label" for="question_9601408101" class="label label">LinkedIn Profile<span aria-hidden="true">*</span>
+</label>
+<input id="question_9601408101" class="input input__single-line" aria-label="LinkedIn Profile" aria-describedby="question_9601408101-description question_9601408101-error question_9601408101-help" aria-invalid="false" aria-errormessage="question_9601408101-error" aria-required="true" type="text" maxlength="255" value="">
+</div>
+</div>
+</div>
+<div class="field-wrapper">
+<fieldset class="checkbox" id="question_9601409101[]" aria-required="true">
+<legend class="label checkbox__description">Please acknowledge that you have read and agree to our Privacy Policy.<!-- --> <span class="required">*</span>
+</legend>
+<div class="checkbox__wrapper">
+<div class="checkbox__input">
+<input description="Please acknowledge that you have read and agree to our Privacy Policy." required="" type="checkbox" id="question_9601409101[]_71316806101" name="question_9601409101[]" aria-describedby="question_9601409101[]-description question_9601409101[]-error" aria-invalid="false" aria-errormessage="question_9601409101[]-error" value="71316806101">
+</div>
+<label for="question_9601409101[]_71316806101">Yes</label>
+</div>
+</fieldset>
+<div class="body body__secondary">
+<div id="question_9601409101[]-description" class="question-description">
+<p>By clicking "Submit Application", you agree to the company's <a class="c-link" href="/privacy" target="_blank" data-stringify-link="/privacy" data-sk="tooltip_parent">Privacy Policy</a>.</p>
+</div>
+</div>
+</div>
+</div>
+<div class="application--submit">
+<button type="submit" class="btn btn--pill" aria-disabled="false">Submit application</button>
+</div>
+</form>
+</main>
+<script>
+  window.__clicks = [];
+  window.__submits = 0;
+  document.addEventListener("click", (e) => {
+    const b = e.target.closest && e.target.closest("button,input,[role=button],a");
+    if (b) window.__clicks.push(b.id || b.textContent.trim());
+  }, true);
+  document.addEventListener("submit", (e) => {
+    e.preventDefault();
+    window.__submits++;
+    window.dispatchEvent(new Event("fixture-submit"));
+  }, true);
+</script>
+<script src="/assets/greenhouse-remix.js"></script>
+<!--slot:script-->
+</body>
+</html>

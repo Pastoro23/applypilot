@@ -24,7 +24,9 @@ export type BatchJob = {
 export type Batch = {
   batchId: string; createdAt: string;
   // Informational only: the server decides at claim time.
-  settings: { allowInvisibleCaptcha: boolean; allowOptionalSensitiveBlank: boolean; dailyCap: number; auto: Record<Ats, boolean> };
+  settings: {
+    allowInvisibleCaptcha: boolean; allowOptionalSensitiveBlank: boolean; allowPrivacyAck: boolean; dailyCap: number; auto: Record<Ats, boolean>;
+  };
   jobs: BatchJob[];
 };
 export type BatchApplication = {
@@ -196,6 +198,7 @@ export async function buildBatch(
       settings: {
         allowInvisibleCaptcha: settings.allowInvisibleCaptcha,
         allowOptionalSensitiveBlank: settings.allowOptionalSensitiveBlank,
+        allowPrivacyAck: settings.allowPrivacyAck,
         dailyCap: settings.dailyCap,
         auto: { greenhouse: settings.auto.greenhouse, lever: settings.auto.lever, ashby: settings.auto.ashby },
       },

@@ -1,4 +1,4 @@
-// End-to-end check of Application Assistant 3.0: the unpacked extension in Chromium, a stub dashboard that keeps
+// End-to-end check of Application Assistant 3.1: the unpacked extension in Chromium, a stub dashboard that keeps
 // the page side of the bridge contract and answers with the real submission store (app/submission-store.ts on
 // node:sqlite), and Greenhouse- and Lever-like forms that count every form POST.
 //   PLAYWRIGHT=/path/to/playwright/index.mjs CHROMIUM=/path/to/chromium node scripts/test-extension-e2e.mjs
@@ -260,7 +260,7 @@ const jobState = async (approvalId) => (await extStorage())[`apJob:${approvalId}
 const dash = await context.newPage();
 await dash.goto(`${DASHBOARD}/`);
 const hello = await dash.evaluate(() => window.__hello());
-assert.equal(hello.version, "3.0.0", "the bridge answers on the dashboard origin");
+assert.equal(hello.version, "3.1.0", "the bridge answers on the dashboard origin");
 
 async function until(check, what, ms = 150000) {
   const deadline = Date.now() + ms;

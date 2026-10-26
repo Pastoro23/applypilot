@@ -234,7 +234,7 @@ export function ReadyToSendPanel({
         return;
       }
       if (!connected) {
-        setNotice(["Approved. Open this page in Chrome on your Mac with Application Assistant 3.0 to send.", ...intro].join(" "));
+        setNotice(["Approved. Open this page in Chrome on your Mac with Application Assistant 3.1 to send.", ...intro].join(" "));
         return;
       }
       try {
@@ -326,7 +326,7 @@ export function ReadyToSendPanel({
     }
   }
 
-  const stopsFor = data?.settings ?? { allowInvisibleCaptcha: true, allowOptionalSensitiveBlank: true };
+  const stopsFor = data?.settings ?? { allowInvisibleCaptcha: true, allowOptionalSensitiveBlank: true, allowPrivacyAck: true };
 
   return (
     <section id="ready-to-send" className="rounded-[24px] border border-blue-500/25 bg-[#0d1a2c] p-5 sm:p-6">
@@ -361,7 +361,7 @@ export function ReadyToSendPanel({
         )}
         {bridge.status === "missing" && waiting.length > 0 && (
           <Banner tone="amber" action={<button onClick={onOpenExtension} className={smallButton}>Set up</button>}>
-            {plural(waiting.length, "application is", "applications are")} approved. Open this page in Chrome on your Mac with Application Assistant 3.0 to send.
+            {plural(waiting.length, "application is", "applications are")} approved. Open this page in Chrome on your Mac with Application Assistant 3.1 to send.
           </Banner>
         )}
       </div>
@@ -449,6 +449,7 @@ export function ReadyToSendPanel({
                 {stopsFor.allowInvisibleCaptcha ? "a CAPTCHA you'd have to solve" : "any CAPTCHA"}, sign-in or account, password, legal certification,{" "}
                 {stopsFor.allowOptionalSensitiveBlank ? "a required demographic or other sensitive question" : "any demographic or other sensitive question"}, a required question it can&apos;t answer, a multi-page form.
                 {stopsFor.allowOptionalSensitiveBlank && " Optional demographic and sensitive questions are left blank."}
+                {stopsFor.allowPrivacyAck && " A required box that only says you've read the privacy policy is ticked for you."}
               </p>
               {data && (
                 <p>
@@ -538,7 +539,7 @@ function Banner({ tone, action, children }: { tone: "blue" | "amber" | "slate"; 
 }
 
 export function bridgeStatusText(bridge: Pick<ExtensionBridge, "status" | "version" | "held">, waiting = 0) {
-  if (bridge.status === "checking") return "Looking for Application Assistant 3.0…";
+  if (bridge.status === "checking") return "Looking for Application Assistant 3.1…";
   if (bridge.status === "missing") return "Not detected: install or reload the extension";
   return `Connected · ${bridge.version}${waiting ? ` · ${waiting} waiting` : ""}`;
 }
@@ -649,6 +650,7 @@ export function SubmitPill({
 const RELAXATION_TEXT: Record<string, string> = {
   invisible_captcha: "Submitted with an invisible CAPTCHA check on the page",
   optional_sensitive_blank: "Optional demographic or sensitive questions left blank",
+  privacy_ack: "Ticked a box saying you've read the privacy policy",
 };
 
 function SubmissionRecord({ id }: { id: string }) {
@@ -800,6 +802,14 @@ export function SubmitSettingsPanel({ data, onSaved }: { data: SubmissionsData |
         title="Leave optional demographic and other sensitive questions blank and still submit"
       >
         ApplyPilot never answers these; this lets it submit when they&apos;re optional. A required one still stops it for you.
+      </Toggle>
+      <Toggle
+        checked={settings.allowPrivacyAck}
+        disabled={busy}
+        onChange={(on) => void save({ ...settings, allowPrivacyAck: on })}
+        title="Tick a required box that only says you've read the privacy policy"
+      >
+        Only a box about reading the company&apos;s privacy policy or notice. Anything that asks you to certify, sign, accept terms or agree to be contacted still stops it for you.
       </Toggle>
       {error && <p className="text-sm text-rose-300">{error}</p>}
     </div>

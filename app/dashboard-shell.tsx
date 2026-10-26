@@ -692,7 +692,7 @@ function Overview({
       view: "applications" as View,
     },
     {
-      title: "Install Application Assistant 3.0",
+      title: "Install Application Assistant 3.1",
       copy: bridge.status === "connected"
         ? "Chrome is connected and ready to send the jobs you approve."
         : "Add it to Chrome on your Mac so the jobs you approve can be sent.",
@@ -1276,11 +1276,11 @@ function ExtensionView({
       <section className="overflow-hidden rounded-[28px] border border-blue-500/20 bg-[radial-gradient(circle_at_85%_10%,rgba(34,211,238,.16),transparent_35%),linear-gradient(135deg,#10233d,#0a1728_65%)] p-6 sm:p-8">
         <div className="grid gap-7 lg:grid-cols-[1.2fr_.8fr] lg:items-center">
           <div>
-            <div className="inline-flex items-center gap-2 rounded-full border border-blue-300/20 bg-blue-400/8 px-3 py-1.5 text-xs font-semibold text-blue-200"><Icon name="bolt" className="h-4 w-4" />Application Assistant 3.0</div>
+            <div className="inline-flex items-center gap-2 rounded-full border border-blue-300/20 bg-blue-400/8 px-3 py-1.5 text-xs font-semibold text-blue-200"><Icon name="bolt" className="h-4 w-4" />Application Assistant 3.1</div>
             <h2 className="mt-5 text-3xl font-semibold tracking-tight text-white sm:text-4xl">Send the jobs you approve, each with its own resume.</h2>
             <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300">It opens each job you approved, fills it from your saved profile, attaches that job&apos;s tailored resume and submits only when every check passes. Anything it can&apos;t answer stays open for you, already filled.</p>
             <div className="mt-6 flex flex-wrap items-center gap-4">
-              <a href="/applypilot-extension.zip" download className="rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-500">Download Application Assistant 3.0</a>
+              <a href="/applypilot-extension.zip" download className="rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-500">Download Application Assistant 3.1</a>
               <button onClick={onDownloadProfile} className="text-xs font-semibold text-slate-400 underline-offset-4 hover:text-slate-200 hover:underline">Profile file for the popup&apos;s manual mode</button>
             </div>
           </div>

@@ -21,7 +21,7 @@ const tailored = {
   },
 };
 
-const settings = { auto: { greenhouse: false, lever: true, ashby: false }, dailyCap: 10, allowInvisibleCaptcha: true, allowOptionalSensitiveBlank: true };
+const settings = { auto: { greenhouse: false, lever: true, ashby: false }, dailyCap: 10, allowInvisibleCaptcha: true, allowOptionalSensitiveBlank: true, allowPrivacyAck: true };
 const NOW = Date.parse('2026-10-26T12:00:00.000Z');
 
 function app(id: string, extra: Record<string, unknown> = {}) {

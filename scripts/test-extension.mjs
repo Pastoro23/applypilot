@@ -248,6 +248,7 @@ function bundle(name) {
 }
 const ASSETS = {
   "/assets/combobox.js": () => fixture("combobox.js"),
+  "/assets/greenhouse-remix.js": () => fixture("greenhouse-remix.js"),
   "/assets/react-form.js": () => bundle("react-form.js"),
   "/assets/bridge-hook.js": () => bundle("bridge-hook.js"),
 };
@@ -279,15 +280,15 @@ async function open(url, pages) {
 }
 
 // The runner passes the approved job's company and whether its posting is in the U.S.; these fixtures are.
-const findAndFill = (p, ats, { profile = PROFILE, resume = RESUME, coverLetter = COVER, company = "Acme Example", usPosting = true } = {}) =>
+const findAndFill = (p, ats, { profile = PROFILE, resume = RESUME, coverLetter = COVER, company = "Acme Example", usPosting = true, allowPrivacyAck = false } = {}) =>
   p.evaluate(
-    async ([ats, profile, resume, coverLetter, company, usPosting]) => {
+    async ([ats, profile, resume, coverLetter, company, usPosting, allowPrivacyAck]) => {
       const ap = globalThis.__applypilot;
       const form = await ap.findForm({ ats, timeoutMs: 5000 });
-      const filled = await ap.fill({ profile, resume, coverLetter, ats, company, usPosting });
+      const filled = await ap.fill({ profile, resume, coverLetter, ats, company, usPosting, allowPrivacyAck });
       return { form, filled };
     },
-    [ats, profile, resume, coverLetter, company, usPosting],
+    [ats, profile, resume, coverLetter, company, usPosting, allowPrivacyAck],
   );
 const auditPage = (p, j, settings = {}) => p.evaluate(([j, settings]) => globalThis.__applypilot.audit({ job: j, settings }), [j, settings]);
 
@@ -668,6 +669,119 @@ test("a required location autocomplete takes the one option for your city and st
     },
   ));
 
+// Greenhouse's newer form: react-select dropdowns for the phone country, location, education and screening
+// questions, each with a hidden required input, and a Privacy Policy box that stays with you.
+const EDU_PROFILE = {
+  ...PROFILE,
+  education: [{ school: "Georgia Piedmont Technical College", degree: "A.A.S. Information Technology", field: "", startYear: "2019", endYear: "2021" }],
+};
+const remix = (profile = EDU_PROFILE, opts = {}) => fixture("greenhouse-remix.html").then((html) => prepare("greenhouse", {}, { html, profile, ...opts }));
+const PRIVACY_BOX = "question_9601409101[]_71316806101";
+const singles = (p) =>
+  p.evaluate(() => Object.fromEntries([...document.querySelectorAll("input.select__input")].map((i) => [i.id, i.closest(".select-shell").querySelector(".select__single-value")?.textContent || ""])));
+
+test("Greenhouse's newer form: profile dropdowns, location and education are filled; only the privacy box is left", () =>
+  using(remix(), async ({ page: p, filled, audit }) => {
+    assert.deepEqual(await singles(p), {
+      country: "United States +1",
+      "candidate-location": "Grayson, Georgia, United States",
+      "school--0": "Georgia Piedmont Technical College",
+      "degree--0": "Associate's Degree",
+      "discipline--0": "Information Technology",
+      question_9601406101: "United States",
+      question_9601407101: "Georgia",
+    });
+    const v = await values(p);
+    assert.deepEqual([v.first_name, v.last_name, v.email, v.phone, v["start-year--0"], v["end-year--0"], v.question_9601408101], ["Test", "Person", "t@example.com", "555-010-0199", "2019", "2021", PROFILE.linkedIn]);
+    assert.deepEqual(codes(audit), ["attestation"]);
+    assert.equal(filled.blockers.length, 0, JSON.stringify(filled.blockers));
+  }));
+
+test("Greenhouse's newer form: what can't be answered is named by its own label, never the hidden input or the result count", () =>
+  using(remix({ ...PROFILE, city: "Nowhere", education: [{ school: "Unknown School", degree: "Certificate in Welding", field: "", startYear: "", endYear: "" }] }), async ({ page: p, audit }) => {
+    const texts = audit.blockers.map((b) => b.text);
+    for (const t of texts) assert.doesNotMatch(t, /results found|: text$/i);
+    for (const label of ["Location (City)", "Degree", "Discipline", "Start date year"]) assert.ok(texts.some((t) => t.endsWith(`: ${label}`)), `${label} in ${texts}`);
+    assert.ok(!texts.some((t) => /School$/.test(t)));
+    assert.equal((await singles(p))["degree--0"], "");
+  }));
+
+test("Greenhouse's newer form: outside the U.S. the state question gets the not-in-the-U.S. answer", () =>
+  using(remix({ ...EDU_PROFILE, country: "Canada", state: "", city: "" }), async ({ page: p }) => {
+    const s = await singles(p);
+    assert.equal(s.question_9601406101, "Canada");
+    assert.equal(s.question_9601407101, "I am not located in the United States");
+    assert.equal(s.country, "Canada +1");
+  }));
+
+test("Greenhouse's newer form: names cleared by a late re-render are typed again before the check", () =>
+  using(
+    fixture("greenhouse-remix.html").then((html) =>
+      prepare("greenhouse", {}, {
+        profile: EDU_PROFILE,
+        // Like a page whose own state was still empty: the first re-render after the location is chosen wipes the names.
+        html: html.replace(
+          "<!--slot:script-->",
+          `<script>
+            new MutationObserver((_, mo) => {
+              if (!document.querySelector("#react-select-candidate-location-placeholder")?.isConnected) {
+                mo.disconnect();
+                setTimeout(() => ["first_name", "last_name", "email"].forEach((id) => (document.getElementById(id).value = "")), 1800);
+              }
+            }).observe(document.body, { subtree: true, childList: true });
+          </script>`,
+        ),
+      }),
+    ),
+    async ({ page: p, audit }) => {
+      const v = await values(p);
+      assert.deepEqual([v.first_name, v.last_name, v.email], ["Test", "Person", "t@example.com"]);
+      assert.ok(!codes(audit).includes("unanswered_required"), JSON.stringify(audit.blockers));
+    },
+  ));
+
+test("privacy-policy box: ticked under the setting and listed with the submission", () =>
+  using(remix(EDU_PROFILE, { fill: { allowPrivacyAck: true } }), async ({ page: p, filled, audit }) => {
+    assert.deepEqual(codes(audit), []);
+    assert.deepEqual(audit.relaxations, ["privacy_ack"]);
+    assert.equal((await values(p))[PRIVACY_BOX], true);
+    assert.ok(filled.filled.some((x) => x.source === "privacy_ack" && x.type === "checkbox"));
+  }));
+
+test("privacy-policy box: with the setting off it stays unticked and goes to you", () =>
+  using(remix(EDU_PROFILE, { settings: { allowPrivacyAck: false }, fill: { allowPrivacyAck: false } }), async ({ page: p, audit }) => {
+    assert.deepEqual(codes(audit), ["attestation"]);
+    assert.equal((await values(p))[PRIVACY_BOX], false);
+  }));
+
+test("privacy-policy box: ticked under a setting that was then turned off still goes to you", () =>
+  using(remix(EDU_PROFILE, { settings: { allowPrivacyAck: false }, fill: { allowPrivacyAck: true } }), async ({ audit }) => {
+    assert.deepEqual(codes(audit), ["attestation"]);
+    assert.deepEqual(audit.relaxations, []);
+  }));
+
+for (const [name, legend] of [
+  ["certify", "I certify the above is true and agree to the Privacy Policy."],
+  ["terms", "I have read and agree to the Privacy Policy and Terms of Service."],
+  ["contact", "I agree to the Privacy Policy and consent to be contacted by SMS."],
+  ["sharing", "I acknowledge the Privacy Policy and agree that my data may be shared with third parties."],
+])
+  test(`privacy-policy box: one that also covers ${name} still goes to you`, () =>
+    using(
+      prepare(
+        "greenhouse",
+        {
+          fields: `<fieldset class="checkbox" id="q[]" aria-required="true"><legend>${legend} <span class="required">*</span></legend><input type="checkbox" required id="ack" name="q[]" value="1"><label for="ack">Yes</label></fieldset>`,
+        },
+        { fill: { allowPrivacyAck: true } },
+      ),
+      async ({ page: p, audit }) => {
+        assert.ok(codes(audit).includes("attestation"));
+        assert.ok(!audit.relaxations.includes("privacy_ack"));
+        assert.equal((await values(p)).ack, false);
+      },
+    ));
+
 test("a required plain-text location with no suggestions is left empty for you", () =>
   using(prepare("greenhouse", { fields: field("location", 'Location<span class="asterisk">*</span>', `<input id="location" name="location" type="text" aria-required="true">`) }), async ({ page: p, filled, audit }) => {
     assert.ok(filled.blockers.some((b) => b.code === "unanswered_required"));
@@ -969,7 +1083,7 @@ test("snapshot keeps structure and leaves out every value", () =>
 test("installing twice keeps one library and its clicked flag", () =>
   using(prepare("greenhouse"), async ({ page: p, audit }) => {
     const first = await p.evaluate(() => (window.__first = globalThis.__applypilot, globalThis.__applypilot.version));
-    assert.equal(first, "3.0.0");
+    assert.equal(first, "3.1.0");
     assert.deepEqual((await press(p, audit.fingerprint)).r, { clicked: true });
     await p.addScriptTag({ path: LIB });
     const s = await p.evaluate((fp) => ({ same: window.__first === globalThis.__applypilot, again: globalThis.__applypilot.pressSubmit(fp), submits: window.__submits }), audit.fingerprint);
@@ -1441,7 +1555,7 @@ test("dashboard hook: a hello sent before the bridge loaded doesn't turn a conne
       window.__hellos = 0;
       let loaded = false, loading = false;
       const reply = (type, payload, replyTo) => window.postMessage({ channel: "applypilot", v: 1, from: "extension", type, id: crypto.randomUUID(), replyTo, payload }, location.origin);
-      const READY = { version: "3.0.0", held: [], running: false, resultsWaiting: 0 };
+      const READY = { version: "3.1.0", held: [], running: false, resultsWaiting: 0 };
       window.addEventListener("message", (e) => {
         const d = e.data;
         if (!d || d.channel !== "applypilot" || d.from !== "dashboard") return;
@@ -1741,6 +1855,8 @@ test("supervised: when ApplyPilot stops waiting, the green outline and 'everythi
     assert.equal(await p.evaluate(() => window.__sent.find((m) => m.kind === "peter_click")?.matches), false);
   }));
 
+// TEST_GREP=text runs only the tests whose name contains that text.
+if (process.env.TEST_GREP) tests.splice(0, tests.length, ...tests.filter(([name]) => name.includes(process.env.TEST_GREP)));
 const CONCURRENCY = 6;
 const TIMEOUT_MS = 90000;
 const settled = tests.map(() => {

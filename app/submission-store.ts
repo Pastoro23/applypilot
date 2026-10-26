@@ -24,11 +24,12 @@ const ATS_LIST: Ats[] = ["greenhouse", "lever", "ashby"];
 const ATS_NAMES: Record<Ats, string> = { greenhouse: "Greenhouse", lever: "Lever", ashby: "Ashby" };
 
 export type SubmissionState = "approved" | "claimed" | "submitted" | "needs_you" | "check" | "not_sent" | "revoked" | "expired";
-export type Relaxation = "invisible_captcha" | "optional_sensitive_blank";
+export type Relaxation = "invisible_captcha" | "optional_sensitive_blank" | "privacy_ack";
 export type Reason = { code: string; text: string };
 export type FillReportEntry = { label: string; type: string; required: boolean; value: string; source: string };
 export type SubmitSettings = {
   auto: Record<Ats, boolean>; dailyCap: number; allowInvisibleCaptcha: boolean; allowOptionalSensitiveBlank: boolean;
+  allowPrivacyAck: boolean;
 };
 export type Calibration = Record<Ats, number>;
 export type ApprovedItem = {
@@ -67,6 +68,8 @@ export const defaultSettings: SubmitSettings = {
   // Peter chose "Skip both" on 2026-10-26; either can be turned off in Extension settings.
   allowInvisibleCaptcha: true,
   allowOptionalSensitiveBlank: true,
+  // Peter chose "Tick them" on 2026-10-26: a required box that only acknowledges a privacy policy may be ticked.
+  allowPrivacyAck: true,
 };
 
 type DbRow = Record<string, unknown>;
@@ -177,6 +180,7 @@ export function parseSettings(value: unknown): SubmitSettings {
     dailyCap: typeof cap === "number" && Number.isInteger(cap) && cap >= 1 && cap <= DAILY_CAP_MAX ? cap : defaultSettings.dailyCap,
     allowInvisibleCaptcha: saved.allowInvisibleCaptcha !== false,
     allowOptionalSensitiveBlank: saved.allowOptionalSensitiveBlank !== false,
+    allowPrivacyAck: saved.allowPrivacyAck !== false,
   };
 }
 
@@ -187,11 +191,13 @@ function checkSettings(value: unknown): SubmitSettings {
   if (!ATS_LIST.every((ats) => typeof auto[ats] === "boolean")) throw invalid();
   if (typeof cap !== "number" || !Number.isInteger(cap) || cap < 1 || cap > DAILY_CAP_MAX) throw invalid();
   if (typeof value.allowInvisibleCaptcha !== "boolean" || typeof value.allowOptionalSensitiveBlank !== "boolean") throw invalid();
+  if (value.allowPrivacyAck !== undefined && typeof value.allowPrivacyAck !== "boolean") throw invalid();
   return {
     auto: { greenhouse: auto.greenhouse === true, lever: auto.lever === true, ashby: auto.ashby === true },
     dailyCap: cap,
     allowInvisibleCaptcha: value.allowInvisibleCaptcha,
     allowOptionalSensitiveBlank: value.allowOptionalSensitiveBlank,
+    allowPrivacyAck: value.allowPrivacyAck !== false,
   };
 }
 
@@ -379,8 +385,8 @@ export async function approveForSubmit(
 function checkClaim(value: unknown): ClaimRequest | null {
   if (!isObject(value)) return null;
   const relaxations = value.relaxations;
-  if (!Array.isArray(relaxations) || relaxations.length > 2 ||
-    !relaxations.every((r) => r === "invisible_captcha" || r === "optional_sensitive_blank") ||
+  if (!Array.isArray(relaxations) || relaxations.length > 3 ||
+    !relaxations.every((r) => r === "invisible_captcha" || r === "optional_sensitive_blank" || r === "privacy_ack") ||
     new Set(relaxations).size !== relaxations.length) return null;
   if (!Array.isArray(value.fillReport)) return null;
   const req: ClaimRequest = {
@@ -486,7 +492,8 @@ export async function claimSubmission(db: SqlDatabase, owner: string, input: unk
   };
 
   if ((req.relaxations.includes("invisible_captcha") && !settings.allowInvisibleCaptcha) ||
-    (req.relaxations.includes("optional_sensitive_blank") && !settings.allowOptionalSensitiveBlank)) {
+    (req.relaxations.includes("optional_sensitive_blank") && !settings.allowOptionalSensitiveBlank) ||
+    (req.relaxations.includes("privacy_ack") && !settings.allowPrivacyAck)) {
     return deny({ ok: false, reason: "setting_changed" });
   }
   if (!currentHash || req.profileHash !== currentHash) return deny({ ok: false, reason: "profile_changed" });

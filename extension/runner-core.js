@@ -5,7 +5,7 @@ import { HOST_PATTERNS, isAllowedUrl, isAts, parseAtsUrl } from "./ats.js";
 
 export const DASHBOARD_ORIGIN = "https://applypilot-hub.amused-bream-5718.chatgpt.site";
 export const DASHBOARD_URL = `${DASHBOARD_ORIGIN}/`;
-export const EXTENSION_VERSION = "3.0.0";
+export const EXTENSION_VERSION = "3.1.0";
 
 const SECOND = 1000;
 const MINUTE = 60 * SECOND;
@@ -93,7 +93,7 @@ const TRANSPORT = new Set(["network", "timeout", "no_dashboard"]);
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HEX64 = /^[0-9a-f]{64}$/;
-const RELAXATIONS = new Set(["invisible_captcha", "optional_sensitive_blank"]);
+const RELAXATIONS = new Set(["invisible_captcha", "optional_sensitive_blank", "privacy_ack"]);
 const TIMED_OUT = Object.freeze({ __apTimeout: true });
 
 const isObject = (v) => Boolean(v) && typeof v === "object" && !Array.isArray(v);
@@ -135,6 +135,7 @@ export function cleanSettings(s) {
     // Informational: the server decides at claim time. Defaults match the server's (Peter chose "Skip both").
     allowInvisibleCaptcha: o.allowInvisibleCaptcha !== false,
     allowOptionalSensitiveBlank: o.allowOptionalSensitiveBlank !== false,
+    allowPrivacyAck: o.allowPrivacyAck !== false,
     dailyCap: Number.isSafeInteger(o.dailyCap) ? o.dailyCap : 10,
     auto: { greenhouse: auto.greenhouse === true, lever: auto.lever === true, ashby: auto.ashby === true },
   };
@@ -920,6 +921,8 @@ export function createRunner(deps, opts = {}) {
       add({ code: "captcha", text: "The page shows a CAPTCHA." });
     if (rel.includes("optional_sensitive_blank") && settings.allowOptionalSensitiveBlank === false)
       add({ code: "demographic", text: "A demographic or personal question needs you" });
+    if (rel.includes("privacy_ack") && settings.allowPrivacyAck === false)
+      add({ code: "attestation", text: "The form asks you to certify or sign something." });
     return out;
   }
 
@@ -1189,7 +1192,15 @@ export function createRunner(deps, opts = {}) {
       const filled = await page(
         tabId,
         "fill",
-        { profile: j.profile, resume: j.resume, coverLetter: j.coverLetter, ats: j.ats, company: j.company, usPosting: j.usPosting === true },
+        {
+          profile: j.profile,
+          resume: j.resume,
+          coverLetter: j.coverLetter,
+          ats: j.ats,
+          company: j.company,
+          usPosting: j.usPosting === true,
+          allowPrivacyAck: rec.settings?.allowPrivacyAck !== false,
+        },
         TIMES.fill,
       );
       if (await isCancelled(id)) throw new Abort("cancelled");

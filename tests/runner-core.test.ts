@@ -722,21 +722,36 @@ test('blockers from the audit give needs_you with a banner and no claim', async 
 test('relaxations go into the claim only while the matching setting is on', async () => {
   const relaxed = () => ({
     fingerprint: 'fp-1', blockers: [], report: [], submit: { path: '#s', label: 'Submit application' },
-    relaxations: ['invisible_captcha', 'optional_sensitive_blank'],
+    relaxations: ['invisible_captcha', 'optional_sensitive_blank', 'privacy_ack'],
   });
   const on = await setup();
   on.scripting.handlers.audit = relaxed;
   await on.runner.recover();
   await on.runner.run({ countdown: false });
-  assert.deepEqual(on.bridge.sent[0].relaxations, ['invisible_captcha', 'optional_sensitive_blank']);
+  assert.deepEqual(on.bridge.sent[0].relaxations, ['invisible_captcha', 'optional_sensitive_blank', 'privacy_ack']);
 
-  const off = await setup({ settings: { auto: { lever: true }, allowInvisibleCaptcha: false, allowOptionalSensitiveBlank: false } });
+  const off = await setup({ settings: { auto: { lever: true }, allowInvisibleCaptcha: false, allowOptionalSensitiveBlank: false, allowPrivacyAck: false } });
   off.scripting.handlers.audit = relaxed;
   await off.runner.recover();
   await off.runner.run({ countdown: false });
   assert.equal(off.bridge.sent.length, 0);
   const [r] = await off.results();
-  assert.deepEqual(r.reasons.map((x: Json) => x.code), ['captcha', 'demographic']);
+  assert.deepEqual(r.reasons.map((x: Json) => x.code), ['captcha', 'demographic', 'attestation']);
+});
+
+test('the fill step is told whether a privacy-policy box may be ticked', async () => {
+  for (const allowPrivacyAck of [true, false]) {
+    const s = await setup({ settings: { auto: { lever: true }, allowPrivacyAck } });
+    let seen: unknown = null;
+    const fill = s.scripting.handlers.fill;
+    s.scripting.handlers.fill = (args: Json, tabId: number) => {
+      seen = args.allowPrivacyAck;
+      return fill(args, tabId);
+    };
+    await s.runner.recover();
+    await s.runner.run({ countdown: false });
+    assert.equal(seen, allowPrivacyAck);
+  }
 });
 
 // ---- cancel, watch, results ----------------------------------------------------------------------
