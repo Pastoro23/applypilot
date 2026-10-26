@@ -371,6 +371,9 @@ function TailoredView({
           <p className="text-sm font-semibold text-white">
             Fit for {application.role} at {application.company} · {covered} of {tailored.requirements.length} requirements covered
           </p>
+          {typeof tailored.originalScore === "number" && (
+            <p className="mt-1 text-xs text-slate-400">Match score: {Math.round(tailored.originalScore)} before tailoring → {Math.round(tailored.fitScore)} after</p>
+          )}
           <p className="mt-1 text-sm leading-6 text-slate-400">{tailored.fitSummary}</p>
         </div>
       </div>
@@ -390,10 +393,40 @@ function TailoredView({
               ))}
             </ul>
           </Box>
+          {(tailored.missingKeywords?.length ?? 0) > 0 && (
+            <Box title="Top missing keywords">
+              <ul className="space-y-2">
+                {tailored.missingKeywords!.map((item) => (
+                  <li key={item.keyword} className="text-xs leading-5">
+                    <span className="text-slate-200">{item.keyword}</span>
+                    <span className={`ml-2 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase ${item.kind === "wording" ? "bg-emerald-500/15 text-emerald-300" : "bg-amber-500/15 text-amber-300"}`}>
+                      {item.kind === "wording" ? "Added" : "You don't show this"}
+                    </span>
+                    {item.note && <span className="block text-slate-500">{item.note}</span>}
+                  </li>
+                ))}
+              </ul>
+            </Box>
+          )}
+          {(tailored.questions?.length ?? 0) > 0 && (
+            <Box title="Questions that would make it stronger">
+              <ul className="list-disc space-y-1 pl-4 text-xs leading-5 text-blue-200/80">
+                {tailored.questions!.map((question) => <li key={question}>{question}</li>)}
+              </ul>
+              <p className="mt-2 text-[11px] text-slate-500">Add the answers to your notes or your saved resume, then tailor again.</p>
+            </Box>
+          )}
           {tailored.gaps.length > 0 && (
             <Box title="Gaps (not added to your resume)">
               <ul className="list-disc space-y-1 pl-4 text-xs leading-5 text-amber-200/80">
                 {tailored.gaps.map((gap) => <li key={gap}>{gap}</li>)}
+              </ul>
+            </Box>
+          )}
+          {(tailored.atsNotes?.length ?? 0) > 0 && (
+            <Box title="ATS readability">
+              <ul className="list-disc space-y-1 pl-4 text-xs leading-5 text-slate-400">
+                {tailored.atsNotes!.map((note) => <li key={note}>{note}</li>)}
               </ul>
             </Box>
           )}

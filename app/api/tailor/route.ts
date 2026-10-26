@@ -37,7 +37,7 @@ export async function POST(request: Request) {
     };
     assertAiConfigured();
     const tailored = await runAiOperation(env.DB as unknown as SqlDatabase, user.email, 'tailor',
-      { version: 1, ...input }, () => tailorResume(input));
+      { version: 2, ...input }, () => tailorResume(input));
     // Recheck source/description/revision atomically: a late AI response cannot erase newer edits.
     await saveTailoredVersion(env.DB as unknown as SqlDatabase, {
       id: application.id, owner: user.email, revision: application.tailoredRevision,
