@@ -874,6 +874,23 @@ function ProfileView({
   function update(field: keyof Profile, value: string) {
     setProfile({ ...profile, [field]: value });
   }
+  const [filling, setFilling] = useState(false);
+  const [fillNote, setFillNote] = useState("");
+  async function fillFromResume() {
+    setFilling(true);
+    setFillNote("");
+    try {
+      const records = await requestJson<{ workHistory: unknown[]; education: unknown[] }>("/api/profile/records", {
+        method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+      });
+      setProfile({ ...profile, workHistory: JSON.stringify(records.workHistory), education: JSON.stringify(records.education) });
+      setFillNote(`Filled ${records.workHistory.length} ${records.workHistory.length === 1 ? "job" : "jobs"} and ${records.education.length} ${records.education.length === 1 ? "school" : "schools"} from your resume. Check them, then save your profile.`);
+    } catch (reason) {
+      setFillNote(reason instanceof Error ? reason.message : "Couldn't read your resume. Try again.");
+    } finally {
+      setFilling(false);
+    }
+  }
 
   return (
     <form onSubmit={onSave} className="space-y-6">
@@ -924,6 +941,14 @@ function ProfileView({
           <Field label="Available start date"><input className={inputClass} placeholder="Example: Immediately or September 1, 2026" value={profile.availability} onChange={(event) => update("availability", event.target.value)} /></Field>
           <Field label="Work history status" hint="Confirms Modern Technology title and dates"><ConfirmationSelect value={profile.workHistoryStatus} onChange={(value) => update("workHistoryStatus", value)} /></Field>
         </div>
+      </Panel>
+
+      <Panel>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <SectionTitle title="Fill from my resume" note="Reads your saved resume into the work history and education below, replacing what's there. Nothing is saved until you save your profile." />
+          <button type="button" disabled={filling} onClick={() => void fillFromResume()} className="shrink-0 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-blue-500 disabled:opacity-60">{filling ? "Reading your resume…" : "Fill from my resume"}</button>
+        </div>
+        {fillNote && <p role="status" className="mt-3 text-sm text-slate-300">{fillNote}</p>}
       </Panel>
 
       <RecordsEditor
