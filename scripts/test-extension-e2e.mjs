@@ -413,7 +413,8 @@ step("you finish a needs-you tab yourself: a second result records it as submitt
   assert.equal(postsTo(passwordJob.job.post), 1, "only your click");
   assert.equal(row(passwordJob.item.approvalId).clicked_by, "you");
   assert.equal(row(passwordJob.item.approvalId).claim_mode, "", "never claimed, so it doesn't count toward unlocking automatic clicks");
-  assert.deepEqual(events(passwordJob.item.approvalId).filter((e) => e.startsWith("result:")), ["result:needs_you", "result:submitted"]);
+  // Your click is recorded at once (check, by you), so the job is held even if no confirmation is ever seen.
+  assert.deepEqual(events(passwordJob.item.approvalId).filter((e) => e.startsWith("result:")), ["result:needs_you", "result:check", "result:submitted"]);
 });
 
 step("an approval you revoke before the claim gets 0 POSTs and its tab is closed", async () => {

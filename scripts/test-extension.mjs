@@ -925,6 +925,7 @@ test("watchForConfirmation reports when you submit a needs-you tab yourself", ()
   using(prepare("greenhouse", { fields: GENDER(true) }), async ({ page: p, audit }) => {
     assert.deepEqual(codes(audit), ["demographic"]);
     await p.evaluate(() => globalThis.__applypilot.watchForConfirmation());
+    await p.click("#submit");
     await p.evaluate(() => {
       document.querySelector("main").innerHTML = "<h1>Thank you for applying.</h1><p>Your application has been received.</p>";
     });
@@ -1213,6 +1214,222 @@ test("your own Submit click in a watched tab is reported, so a later confirmatio
     await p.waitForTimeout(200);
     assert.equal(await p.evaluate(() => window.__sent.filter((m) => m.kind === "peter_click").length), 0);
   }));
+
+// ---- step 3 round 2: eligibility scope, group required marks, someone else's details, routes ----------
+
+const leverRadios = (name, question) =>
+  `<li class="application-question custom-question"><div class="application-label"><div class="text">${question}<span class="required">✱</span></div></div>
+    <div class="application-field"><ul data-qa="multiple-choice">${["Yes", "No"]
+      .map((o, i) => `<li><label><input type="radio" name="cards[${name}][field0]" id="${name}-${i}" value="${o}" required><span class="application-answer-alternative">${o}</span></label></li>`)
+      .join("")}</ul></div></li>`;
+const SUBMITTED = (p, fp) => p.evaluate((fp) => ({ r: globalThis.__applypilot.pressSubmit(fp), submits: window.__submits }), fp);
+
+test("work authorization: other places and other conditions are never answered, on Greenhouse or Lever; plain US phrasings are", async () => {
+  const notUs = {
+    on: "Are you legally authorized to work in Ontario?",
+    lu: "Are you legally authorized to work in Luxembourg?",
+    to: "Do you have work authorization for Toronto?",
+    ld: "Are you eligible to work in London?",
+    lt: "Will you require visa sponsorship to work in Lithuania?",
+    rc: "Are you legally authorized to work in the country where this role is based?",
+    fd: "Are you eligible to work for the U.S. federal government?",
+    cl: "Are you authorized to work in a classified environment?",
+    it: "Are you authorized to work with ITAR-controlled technical data as a U.S. person?",
+    ch: "Are you legally authorized to work with children in a school setting?",
+    os: "Are you legally able to work on-site in our Atlanta office five days a week?",
+    rs: "Are you eligible to work remotely from your current state of residence?",
+    hz: "Are you legally permitted to work with hazardous materials?",
+  };
+  const us = {
+    az: "Do you have authorization to work in the United States?",
+    cn: "Can you legally work in the United States?",
+    al: "Are you legally allowed to work in the United States?",
+    af: "Are you authorized for employment in the United States?",
+  };
+  // An audit lists at most ten blockers, so the questions go on two pages.
+  const keys = Object.keys(notUs);
+  const pages = [
+    [keys.slice(0, 7), Object.keys(us)],
+    [keys.slice(7), []],
+  ];
+  for (const [ats, wrap] of [
+    ["greenhouse", reqRadios],
+    ["lever", leverRadios],
+  ])
+    for (const [no, yes] of pages)
+      await using(prepare(ats, { fields: [...no, ...yes].map((k) => wrap(`q_${k}`, notUs[k] || us[k])).join("") }), async ({ page: p, audit }) => {
+        const v = await values(p);
+        for (const k of no) assert.equal(await checkedIn(p, ats === "lever" ? `cards[q_${k}][field0]` : `q_${k}`), 0, `${ats}: ${notUs[k]}`);
+        for (const k of yes) assert.deepEqual([v[`q_${k}-0`], v[`q_${k}-1`]], [true, false], `${ats}: ${us[k]}`);
+        const asked = audit.blockers.filter((b) => b.code === "unanswered_required").map((b) => b.text);
+        assert.equal(asked.length, no.length, `${ats}:\n${asked.join("\n")}`);
+        for (const k of no) assert.ok(asked.some((t) => t.includes(notUs[k])), `${ats}: ${notUs[k]} is not among the blockers`);
+        assert.equal((await SUBMITTED(p, audit.fingerprint)).submits, 0);
+      });
+});
+
+test("a native select never takes an answer with more in parentheses: 'Yes (U.S. citizen)', 'No (I am a U.S. citizen)'", () =>
+  using(
+    prepare("greenhouse", {
+      fields:
+        field("q_auth", `Are you legally authorized to work in the United States?${REQ}`, `<select id="q_auth" name="q_auth" required><option value="">Select...</option><option value="c">Yes (U.S. citizen)</option><option value="n">No (I will need sponsorship)</option></select>`) +
+        field("q_sp", `Will you now or in the future require sponsorship?${REQ}`, `<select id="q_sp" name="q_sp" required><option value="">Select...</option><option value="y">Yes (H-1B or other visa)</option><option value="n">No (I am a U.S. citizen)</option></select>`),
+    }),
+    async ({ page: p, filled, audit }) => {
+      const v = await values(p);
+      assert.deepEqual([v.q_auth, v.q_sp], ["", ""]);
+      assert.equal(audit.blockers.filter((b) => b.code === "unanswered_required").length, 2, JSON.stringify(audit.blockers));
+      assert.ok(!filled.filled.some((x) => /citizen|sponsorship|visa/.test(x.value)));
+    },
+  ));
+
+test("required checkbox and radio groups block wherever the star sits, with an Other box, a hidden id or ARIA boxes", async () => {
+  const cases = {
+    demoSelfDescribe: [
+      `<fieldset class="field" aria-required="true"><legend>Race / Ethnicity (select all that apply)*</legend><label><input type="checkbox" name="race[]" value="w" id="r1">White</label><label><input type="checkbox" name="race[]" value="b" id="r2">Black or African American</label><label for="race_other">Prefer to self-describe</label><input type="text" id="race_other" name="race_other"></fieldset>`,
+      "demographic",
+    ],
+    hearOther: [
+      `<fieldset class="field"><legend>How did you hear about us?*</legend><label><input type="checkbox" name="hear[]" value="li" id="h1">LinkedIn</label><label><input type="checkbox" name="hear[]" value="fr" id="h2">Friend</label><label for="hear_other">Other</label><input type="text" id="hear_other" name="hear_other"></fieldset>`,
+      "unanswered_required",
+    ],
+    ackWithText: [
+      `<fieldset class="field"><legend>Acknowledgement*</legend><label><input type="checkbox" name="ack" value="1" id="ack">I have read the candidate notice</label><input type="text" name="ack_note" id="ack_note" placeholder="Notes"></fieldset>`,
+      null,
+    ],
+    divShifts: [
+      `<div class="field"><label>Which shifts can you work?${REQ}</label><label><input type="checkbox" name="shift[]" value="d" id="s1">Day</label><label><input type="checkbox" name="shift[]" value="n" id="s2">Night</label></div>`,
+      "unanswered_required",
+    ],
+    divRace: [
+      `<div class="field"><label>Race${REQ}</label><label><input type="checkbox" name="race[]" value="w" id="r1">White</label><label><input type="checkbox" name="race[]" value="b" id="r2">Black or African American</label></div>`,
+      "demographic",
+    ],
+    divRelocate: [
+      `<div class="field"><label>Are you willing to relocate?${REQ}</label><label><input type="radio" name="reloc" value="Yes" id="rl_y">Yes</label><label><input type="radio" name="reloc" value="No" id="rl_n">No</label></div>`,
+      "unanswered_required",
+    ],
+    ariaGender: [
+      `<div class="field"><div id="gl">Gender*</div><div role="group" aria-required="true" aria-labelledby="gl"><div role="checkbox" aria-checked="false" tabindex="0">Male</div><div role="checkbox" aria-checked="false" tabindex="0">Female</div></div></div>`,
+      "demographic",
+    ],
+    ariaShifts: [
+      `<div class="field"><div id="sl">Which shifts can you work?*</div><div role="group" aria-labelledby="sl"><div role="checkbox" aria-checked="false" tabindex="0">Day</div><div role="checkbox" aria-checked="false" tabindex="0">Night</div></div></div>`,
+      "unanswered_required",
+    ],
+    ghClassicAck: [
+      `<div class="field"><label>Background check acknowledgement ${REQ}</label><input type="hidden" name="job_application[answers_attributes][4][question_id]" value="555"><label><input type="checkbox" id="ack" name="job_application[answers_attributes][4][boolean_value]" value="1"> I acknowledge that an offer is contingent on a background check</label></div>`,
+      null,
+    ],
+    ghClassicMulti: [
+      `<div class="field"><label>Which certifications do you hold? ${REQ}</label><input type="hidden" name="job_application[answers_attributes][5][question_id]" value="556"><label><input type="checkbox" id="c0" name="job_application[answers_attributes][5][answer_selected_options_attributes][0][question_option_id]" value="1"> CompTIA A+</label><label><input type="checkbox" id="c1" name="job_application[answers_attributes][5][answer_selected_options_attributes][1][question_option_id]" value="2"> Network+</label></div>`,
+      "unanswered_required",
+    ],
+  };
+  await Promise.all(
+    Object.entries(cases).map(([name, [fields, code]]) =>
+      using(prepare("greenhouse", { fields }), async ({ page: p, audit }) => {
+        assert.ok(audit.blockers.length, `${name} did not block`);
+        if (code) assert.ok(codes(audit).includes(code), `${name}: ${JSON.stringify(codes(audit))}`);
+        assert.ok(!audit.relaxations.includes("optional_sensitive_blank"), `${name}: a required group was relaxed as optional`);
+        assert.equal(await p.evaluate(() => document.querySelectorAll("input:checked,[aria-checked=true]").length), 0, name);
+        assert.equal((await SUBMITTED(p, audit.fingerprint)).submits, 0, name);
+      }),
+    ),
+  );
+});
+
+test("a required popup button made from a div blocks, for a demographic question and an ordinary one", async () => {
+  const cases = [
+    [`<div class="field"><div id="gl2">Gender*</div><div role="button" aria-haspopup="listbox" aria-labelledby="gl2" tabindex="0">Select...</div></div>`, "demographic"],
+    [`<div class="field"><div id="yl2">Years of experience*</div><div role="button" aria-haspopup="listbox" aria-labelledby="yl2" tabindex="0">Select...</div></div>`, "unanswered_required"],
+  ];
+  await Promise.all(
+    cases.map(([fields, code]) =>
+      using(prepare("greenhouse", { fields }), async ({ page: p, audit }) => {
+        assert.ok(codes(audit).includes(code), `${fields.slice(0, 60)}: ${JSON.stringify(codes(audit))}`);
+        assert.equal((await SUBMITTED(p, audit.fingerprint)).submits, 0);
+      }),
+    ),
+  );
+});
+
+test("a reference's or emergency contact's name, email and phone are never filled with yours", () =>
+  using(
+    prepare("greenhouse", {
+      fields: `<fieldset class="field"><legend>Professional reference*</legend>
+          ${field("ref_name", "Full name*", `<input id="ref_name" name="question_3001" type="text" required>`)}
+          ${field("ref_email", "Email*", `<input id="ref_email" name="question_3002" type="text" required>`)}
+          ${field("ref_phone", "Phone*", `<input id="ref_phone" name="question_3003" type="tel" required>`)}</fieldset>
+        <section><h3>Emergency contact</h3>
+          ${field("em_name", "Name*", `<input id="em_name" name="question_3101" type="text" required>`)}
+          ${field("em_phone", "Phone number*", `<input id="em_phone" name="question_3102" type="tel" required>`)}</section>`,
+    }),
+    async ({ page: p, filled, audit }) => {
+      const v = await values(p);
+      assert.deepEqual([v.ref_name, v.ref_email, v.ref_phone, v.em_name, v.em_phone], ["", "", "", "", ""]);
+      assert.deepEqual([v.first_name, v.email, v.phone], [PROFILE.firstName, PROFILE.email, PROFILE.phone], "your own fields are still filled");
+      assert.equal(audit.blockers.filter((b) => b.code === "unanswered_required").length, 5, JSON.stringify(audit.blockers));
+      for (const mine of [PROFILE.email, PROFILE.phone, PROFILE.fullName]) assert.ok(filled.filled.filter((x) => x.value === mine).length <= 1, mine);
+    },
+  ));
+
+test("education and work-history selects take your degree and month in the site's wording", () =>
+  using(
+    prepare(
+      "greenhouse",
+      {
+        fields: `<section class="education"><h3>Education</h3>
+          ${field("school", `School${REQ}`, `<input id="school" name="school" type="text" aria-required="true">`)}
+          ${field("degree", `Degree${REQ}`, `<select id="degree" name="degree" required><option value="">Select...</option><option value="1">High School</option><option value="2">Associate's Degree</option><option value="3">Bachelor's Degree</option><option value="4">Master's Degree</option></select>`)}
+          ${field("end_year", `End year${REQ}`, `<select id="end_year" name="end_year" required><option value="">Year</option><option value="2018">2018</option><option value="2019">2019</option><option value="2020">2020</option></select>`)}</section>
+        <section class="work"><h3>Work Experience</h3>
+          ${field("company", `Company${REQ}`, `<input id="company" name="company" type="text" aria-required="true">`)}
+          ${field("title", `Title${REQ}`, `<input id="title" name="title" type="text" aria-required="true">`)}
+          ${field("start_month", `Start month${REQ}`, `<select id="start_month" name="start_month" required><option value="">Month</option><option value="1">January</option><option value="2">February</option><option value="3">March</option><option value="4">April</option></select>`)}
+          ${field("start_year", `Start year${REQ}`, `<input id="start_year" name="start_year" type="text" aria-required="true">`)}
+          <div class="field"><label><input type="checkbox" id="current" name="current">I currently work here</label></div></section>`,
+      },
+      {
+        profile: {
+          ...PROFILE,
+          education: [{ school: "Georgia State University", degree: "Bachelor’s", field: "Information Technology", endYear: "2019" }],
+          workHistory: [{ company: "Globex", title: "IT Support", startMonth: "3", startYear: "2021", current: true }],
+        },
+      },
+    ),
+    async ({ page: p, audit }) => {
+      const v = await values(p);
+      assert.deepEqual([v.school, v.degree, v.end_year, v.company, v.title, v.start_month, v.start_year, v.current], ["Georgia State University", "3", "2019", "Globex", "IT Support", "3", "2021", true]);
+      assert.deepEqual(codes(audit), []);
+    },
+  ));
+
+test("a watched Ashby tab that moves to the job's Overview is never read as sent; your own Submit click and the success screen are", async () => {
+  const fields = `<div class="field-entry"><label for="q_why">Why do you want to work here?<span class="req">*</span></label><textarea id="q_why" name="q_why" required></textarea></div>`;
+  await using(prepare("ashby", { fields }), async ({ page: p, audit }) => {
+    assert.ok(codes(audit).includes("unanswered_required"));
+    await p.evaluate(() => {
+      globalThis.__applypilot.watchForConfirmation({ ats: "ashby" });
+      setTimeout(() => {
+        history.pushState({}, "", location.pathname.replace(/\/application$/, ""));
+        document.getElementById("app").innerHTML = `<h1>Help Desk Technician</h1><nav><a href="#">Overview</a> <a href="#">Application</a></nav>
+          <section><h2>About the role</h2><p>You will support 300 staff on Windows and Active Directory.</p><p>Thank you for your application and your interest in Acme! Every application received will be reviewed.</p></section>`;
+      }, 300);
+    });
+    await p.waitForTimeout(3000);
+    assert.equal(await p.evaluate(() => window.__sent.filter((m) => m.kind === "confirmed").length), 0);
+  });
+  await using(prepare("ashby", { fields }), async ({ page: p }) => {
+    await p.evaluate(() => globalThis.__applypilot.watchForConfirmation({ ats: "ashby" }));
+    await p.fill("#q_why", "I like the team.");
+    await p.click("#submit");
+    await p.waitForFunction(() => window.__sent.some((m) => m.kind === "confirmed"), null, { timeout: 6000 });
+    const ev = await p.evaluate(() => window.__sent.find((m) => m.kind === "confirmed"));
+    assert.equal(ev.confirmationKind, "in_page_only");
+    assert.match(ev.text, /Thank you for applying/);
+  });
+});
 
 test("dashboard hook: a hello sent before the bridge loaded doesn't turn a connected bridge into missing", async () => {
   const url = "https://applypilot.example/applications";

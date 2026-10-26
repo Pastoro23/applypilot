@@ -1,7 +1,7 @@
 // Message router. The dashboard reaches it only through bridge.js on the dashboard origin; the runner page
 // does the work itself, so nothing here waits on a page or clicks anything.
 
-import { DASHBOARD_ORIGIN, KEYS, acceptBatch, ackResults, cancelJobs, cleanup, heldSummary, pullResults } from "./runner-core.js";
+import { DASHBOARD_ORIGIN, KEYS, acceptBatch, ackResults, cancelJobs, cleanup, focusJobTab, forgetTabs, heldSummary, pullResults } from "./runner-core.js";
 
 const local = chrome.storage.local;
 const session = chrome.storage.session;
@@ -50,7 +50,7 @@ async function fromDashboard(msg, sender) {
       return { ok: true };
     }
     case "AP_FOCUS":
-      return focusJob(payload.approvalId);
+      return focusJobTab(local, chrome, payload.approvalId);
     case "AP_PULL_RESULTS":
       return { results: await pullResults(local) };
     case "AP_RESULTS_ACK":
@@ -119,18 +119,5 @@ async function ensureRunner() {
   await session.set({ apRunnerWindowId: win.id });
 }
 
-async function focusJob(approvalId) {
-  if (typeof approvalId !== "string") return { ok: false };
-  const key = KEYS.job(approvalId);
-  const rec = (await local.get(key))[key];
-  if (!rec || typeof rec.tabId !== "number") return { ok: false };
-  try {
-    const tab = await chrome.tabs.update(rec.tabId, { active: true });
-    await chrome.windows.update(tab.windowId, { focused: true });
-    return { ok: true };
-  } catch {
-    return { ok: false };
-  }
-}
-
-chrome.runtime.onStartup.addListener(() => cleanup(local, Date.now()));
+// Tab ids from before Chrome restarted belong to other tabs now.
+chrome.runtime.onStartup.addListener(() => forgetTabs(local).then(() => cleanup(local, Date.now())));

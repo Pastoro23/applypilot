@@ -9,7 +9,7 @@ import {
   approvedItemFromRow, CALIBRATION_NEEDED,
   type ApprovedItem, type Calibration, type SkippedItem, type SubmissionRow, type SubmitSettings,
 } from "./submission-store";
-import { alreadySubmittedReason, checkText, isStaleClaim, pillLabel, resumeNotice, staleText } from "./submit-pill";
+import { alreadySubmittedReason, checkText, isStaleClaim, pillLabel, resumeNotice, staleText, tabGoneText } from "./submit-pill";
 
 // "Ready to send": review the tailored jobs, approve them with one tap, and Chrome submits each with its own resume.
 // Everything an employer wrote (reasons, confirmation text, labels) is rendered as plain React text.
@@ -607,7 +607,17 @@ export function SubmitPill({
         {row.state === "approved" && <button disabled={busy} onClick={() => void act(() => onCancel(row.id))} className={smallButton}>Cancel</button>}
         {row.state === "submitted" && <button onClick={() => setRecord(!record)} className={smallButton}>{record ? "Hide record" : "Submission record"}</button>}
         {(row.state === "needs_you" || row.state === "check") && bridge.status === "connected" && (
-          <button disabled={busy} onClick={() => void act(() => bridge.focus(row.id))} className={smallButton}>Show tab</button>
+          <button
+            disabled={busy}
+            onClick={() =>
+              void act(async () => {
+                if (!(await bridge.focus(row.id))) throw new Error(tabGoneText(row.state));
+              })
+            }
+            className={smallButton}
+          >
+            Show tab
+          </button>
         )}
         {row.state === "needs_you" && /^https:\/\//i.test(row.applyUrl) && (
           <a href={row.applyUrl} target="_blank" rel="noreferrer" className={`${smallButton} text-blue-300`}>Open application</a>

@@ -508,29 +508,41 @@
   const ROBOT = /i'?m not a robot|verify you are human/i;
   const BUSY = /uploading|spinner|progress/i;
   const STAR = /[*✱]\s*$|\(required\)/i;
-  const AUTH_Q = /authori[sz]ed|authori[sz]ation|legally.*work|eligible to work|right to work/;
+  const AUTH_Q = /authori[sz]ed|authori[sz]ation|legally.*work|(eligible|allowed|permitted|entitled) to (legally )?work|right to work/;
   const SPON_Q = /sponsor|visa/;
-  // Your Yes/No flags mean working in the U.S. A question about another country, or about something else that
-  // happens to say "authorized" or "eligible" (a background check, driving, weekends), goes to you.
-  const WORK_AUTH_Q =
-    /(authori[sz]ed|eligible|right|permitted|permission|able) to (legally )?(work|be employed)|(work|employment) (authori[sz]ation|eligibility|permit)/;
-  const OTHER_PLACES = [
-    "canada", "(?<!new )mexico", "united kingdom", "u\\.k\\.?", "uk", "great britain", "britain", "(?<!new )england", "scotland",
-    "wales", "ireland", "europe", "european", "eu", "eea", "germany", "france", "spain", "portugal", "italy", "netherlands",
-    "belgium", "switzerland", "austria", "poland", "sweden", "norway", "denmark", "finland", "czech", "romania", "hungary",
-    "greece", "turkey", "israel", "ukraine", "india", "pakistan", "philippines", "singapore", "malaysia", "indonesia",
-    "vietnam", "thailand", "china", "hong kong", "taiwan", "japan", "korea", "australia", "new zealand", "brazil",
-    "argentina", "chile", "colombia", "peru", "costa rica", "south africa", "nigeria", "kenya", "egypt",
-    "united arab emirates", "uae", "saudi", "qatar", "emea", "apac", "latam", "latin america", "south america",
-    "central america", "north america", "puerto rico", "any country", "another country", "other countr(y|ies)",
-  ];
-  const OTHER_PLACE = new RegExp(`(^|[^a-z])(${OTHER_PLACES.join("|")})([^a-z]|$)`);
-  const NOT_ELIGIBILITY = /background|\bcheck|drug|credit|reference|contact|driv|vehicle|weekend|overtime|shift|schedule|clearance|travel|relocat|night|hours|on.?call/;
+  // Your Yes/No flags mean working in the U.S. for any employer. A question is answered only when every word in it
+  // belongs to a plain U.S. work-authorization or sponsorship question: another place ("Ontario", "the country where
+  // this role is based"), another condition ("weekends", "a classified environment", "as a U.S. person") or any word
+  // ApplyPilot doesn't expect goes to you.
+  const US_NAME = /(^|[^a-z])(the )?(united states( of america)?|u\.\s?s\.(\s?a\.)?|u\.s(?![a-z])|usa|america)(?![a-z])/g;
+  const US_WORK_WORDS = new Set(
+    `are is do does will would can could have has you your i am currently presently now still legally lawfully legal valid
+    authorized authorised eligible permitted allowed entitled able right authorization authorisation permission eligibility
+    work working employment employed be to for in within the a an of and or not no yes any employer employers company us
+    without need needs needed require requires required sponsor sponsorship sponsored visa visas status immigration future
+    at this time full part basis on such as e g eg h1b h1 tn opt cpt ead stem o1 e3 l1 f1 j1 petition support obtain accept
+    position role job please confirm indicate whether if that`.split(/\s+/),
+  );
+  function usWorkQuestion(q, aQ) {
+    const words = norm(
+      String(q)
+        .toLowerCase()
+        .replace(US_NAME, "$1us")
+        .replace(/[^a-z0-9]+/g, " ")
+        .replace(/\b([a-z]) ?(\d)([a-z]?)\b/g, "$1$2$3"),
+    ).split(" ");
+    if (!words[0] || !words.every((w) => US_WORK_WORDS.has(w) || /^\d+$/.test(w))) return false;
+    return !aQ || words.some((w) => ["work", "working", "employment", "employed"].includes(w));
+  }
   // Batch mode ticks only a box that says, in full, that this is your current job. "You may contact my current
   // employer" or "I am currently subject to a non-compete" are questions for you.
   const CURRENT_JOB =
     /^(i )?(currently|still) work here$|^(i )?work here currently$|^(this is my )?current (job|role|position|employer|company)$|^(i am )?currently (working|employed) here$|^present$|^current$/;
   const NOT_SELF = /refer|reference|manager|supervisor|emergency|recruiter|friend|spouse|partner|parent|guardian|hiring|interviewer|company|employer/i;
+  // The heading over a group of short fields that belong to someone else ("Professional reference", "Emergency
+  // contact"). Narrower than NOT_SELF, since a job title such as "IT Support Manager" can head a form.
+  const OTHER_PERSON =
+    /\b(refer(ence|ee|ral|rer)s?|referred|emergency|next of kin|spouse|parent|guardian|relatives?|friends?|(manager|supervisor|employer)('s)? (contact|details|information|info))\b/i;
   const LOCATION = /\blocation\b|\bcity\b/i;
   const PLACEHOLDER = /^(select|choose|pick|search|start typing|type to search|please select)\b/i;
   const TEXTLIKE = ["text", "email", "tel", "url", "search", "textarea"];
@@ -624,6 +636,7 @@
     root: null,
     rootSeen: false,
     successBefore: null,
+    href: "",
     filled: new Map(),
     audit: null,
     flagged: [],
@@ -761,6 +774,28 @@
       .map((x) => norm(x).replace(/[\s*:✱]+$/, "").trim())
       .filter(Boolean);
   }
+  // Whose details a field asks for, read from the legend or heading of each box it sits in inside the form: the
+  // heading nearest before it at each level, so a flat list under "Emergency contact" counts too.
+  function ownerContext(f, root) {
+    const heads = "legend,h1,h2,h3,h4,h5,h6,[role=heading]";
+    const parts = [textOf(groupLabelEl(f))];
+    for (let child = f, e = f.parentElement; e && root.contains(e); child = e, e = e.parentElement) {
+      if (e !== root) {
+        parts.push(e.getAttribute("aria-label") || "");
+        for (const id of (e.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean)) parts.push(textOf(document.getElementById(id)));
+      }
+      for (let c = child.previousElementSibling; c; c = c.previousElementSibling) {
+        const head = c.matches(heads) ? c : c.querySelector("input,select,textarea") ? null : c.querySelector(heads);
+        if (head) {
+          parts.push(textOf(head));
+          break;
+        }
+      }
+      if (e === root) break;
+    }
+    return parts.join(" ");
+  }
+  const forSomeoneElse = (f, root) => NOT_SELF.test(labelTexts(f).join(" ")) || OTHER_PERSON.test(ownerContext(f, root));
   // What a field is called, without placeholder hints such as "Add a cover letter or anything else".
   const nameTexts = (f) => [...labelEls(f).map((l) => textOf(l)), f.getAttribute("aria-label"), f.getAttribute("name"), f.id].filter(Boolean).join(" ");
   // Short names only: label text, aria-label and placeholder as written; name, id and autocomplete as words
@@ -871,15 +906,58 @@
     isRequired(f) || (groupRequired(f) && !controlsIn(f.closest(GROUPS)).some((x) => x !== f && ["text", "textarea"].includes(typeOf(x)) && !!norm(x.value)));
   const coverFile = (f) => /cover/i.test(`${nameTexts(f)} ${textOf(groupLabelEl(f))}`);
   const checkedOf = (x) => (x.tagName === "INPUT" ? x.checked : x.getAttribute("aria-checked") === "true");
-  // Checkboxes that answer one question: the same name, or a group holding nothing but checkboxes. A box that is
-  // required on its own stays its own question.
+  // Checkboxes that answer one question: the same name, a group holding nothing but checkboxes, or (Greenhouse's
+  // classic form names each option on its own) a labelled box holding nothing but checkboxes. ARIA checkboxes in one
+  // role=group are one question too. A box that is required on its own stays its own question.
   function checkGroup(f, root) {
-    if (f.tagName !== "INPUT") return [f];
+    if (f.tagName !== "INPUT") {
+      const g = f.closest("[role=group],fieldset");
+      const all = g && root.contains(g) ? controlsIn(g).filter((x) => typeOf(x) !== "hidden") : [];
+      return all.length > 1 && all.every((x) => x.tagName !== "INPUT" && ["checkbox", "switch"].includes(typeOf(x))) ? all : [f];
+    }
     const named = f.name ? Array.from(root.querySelectorAll(`input[type=checkbox][name="${CSS.escape(f.name)}"]`)) : [];
     const g = f.closest(GROUPS);
     const ctl = g && root.contains(g) ? controlsIn(g).filter((x) => typeOf(x) !== "hidden") : [];
-    const boxes = named.length > 1 ? named : ctl.length > 1 && ctl.every((x) => x.tagName === "INPUT" && typeOf(x) === "checkbox") ? ctl : [f];
+    const onlyBoxes = (list) => list.length > 1 && list.every((x) => x.tagName === "INPUT" && typeOf(x) === "checkbox");
+    let boxes = named.length > 1 ? named : onlyBoxes(ctl) ? ctl : [f];
+    if (boxes.length === 1 && !g) {
+      for (let box = f.parentElement, i = 0; box && box !== root && root.contains(box) && i < 4; box = box.parentElement, i++) {
+        const inBox = controlsIn(box).filter((x) => typeOf(x) !== "hidden");
+        if (!inBox.every((x) => x.tagName === "INPUT" && typeOf(x) === "checkbox")) break;
+        if (onlyBoxes(inBox) && questionLabelIn(box, inBox)) {
+          boxes = inBox;
+          break;
+        }
+      }
+    }
     return boxes.some(isRequired) ? [f] : boxes;
+  }
+  // The question a set of options answers, also where no fieldset or group element marks it: the nearest box that
+  // holds all the options and, besides them, at most one optional text box (an "Other" or "self-describe" answer),
+  // with the label written before the options. Its star or required mark makes the whole question required.
+  function optionsQuestion(els, root) {
+    let box = els[0].parentElement;
+    while (box && box !== root && root.contains(box) && !els.every((x) => box.contains(x))) box = box.parentElement;
+    for (let i = 0; box && box !== root && root.contains(box) && i < 4; i++, box = box.parentElement) {
+      const rest = controlsIn(box).filter((x) => !els.includes(x) && typeOf(x) !== "hidden" && !isButtonLike(x));
+      if (rest.length > 1 || rest.some((x) => !TEXTLIKE.includes(typeOf(x)) || isCombo(x) || isRequired(x))) return null;
+      const label = questionLabelIn(box, els);
+      if (!label) continue;
+      const required =
+        box.getAttribute("aria-required") === "true" || STAR.test(textOf(label)) || label.matches(REQUIRED_MARK) || !!label.querySelector(REQUIRED_MARK);
+      return { box, label, companion: rest[0] || null, required };
+    }
+    return null;
+  }
+  function questionLabelIn(box, els) {
+    const own = new Set(els.flatMap(labelEls));
+    for (const el of box.querySelectorAll("legend,label,div,span,p,h3,h4,h5,h6")) {
+      if (el.contains(els[0])) continue;
+      if (!(el.compareDocumentPosition(els[0]) & Node.DOCUMENT_POSITION_FOLLOWING)) break;
+      if (own.has(el) || el.querySelector("input,select,textarea,[role=checkbox],[role=radio],[role=switch]") || !textOf(el)) continue;
+      return el;
+    }
+    return null;
   }
   const controlsIn = (root) =>
     Array.from(new Set(root.querySelectorAll("input,select,textarea,button,[role=button],[role=combobox],[role=checkbox],[role=radio],[role=switch]")));
@@ -1113,19 +1191,40 @@
     }
     return [...new Set(out)];
   }
+  const MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
+  // A work or education record value as a select may show it: a month as its number, name or short name, a degree
+  // with " degree" after it ("Bachelor's" is "Bachelor's Degree").
+  function recordVariants(key, value) {
+    const v = norm(value).toLowerCase().replace(/[\u2018\u2019]/g, "'");
+    if (!v) return [];
+    const out = [...variants(key, value), v];
+    if (/month$/i.test(key)) {
+      const n = /^\d{1,2}$/.test(v) ? Number(v) : MONTHS.findIndex((m) => m === v || m.slice(0, 3) === v.replace(/\.$/, "")) + 1;
+      if (n >= 1 && n <= 12) out.push(String(n), String(n).padStart(2, "0"), MONTHS[n - 1], MONTHS[n - 1].slice(0, 3));
+    }
+    if (key === "degree") out.push(`${v} degree`);
+    return [...new Set(out)];
+  }
   // A native select takes only the one option whose text is exactly an approved spelling, so "United States" never
   // becomes "United States Minor Outlying Islands" and "Yes" never becomes "Yes, I am a U.S. citizen". A matching
-  // value counts only on an option with no text of its own.
-  function selectOption(f, wants) {
+  // value counts only on an option with no text of its own. A profile or record value may drop a trailing note in
+  // brackets ("Georgia (GA)"); a Yes/No answer ("answer") never does, so "Yes (U.S. citizen)" is not your answer. A
+  // record value with no option showing it may still match one option's own value (month 3 is value="3").
+  function selectOption(f, wants, mode = "profile") {
+    const clean = (t) => norm(t).toLowerCase().replace(/[\u2018\u2019]/g, "'");
     const bare = (t) => t.replace(/\s*\([^)]*\)$/, "").trim();
-    const hits = Array.from(f.options || []).filter((o) => {
-      const t = norm(o.textContent).toLowerCase();
-      return !o.disabled && wants.some((w) => !!w && (t === w || bare(t) === w || (!t && o.value.toLowerCase() === w)));
+    const options = Array.from(f.options || []).filter((o) => !o.disabled);
+    const hits = options.filter((o) => {
+      const t = clean(o.textContent);
+      const shown = mode === "record" ? [t, t.replace(/\.$/, "")] : [t];
+      return wants.some((w) => !!w && (shown.includes(w) || (mode !== "answer" && bare(t) === w) || (!t && o.value.toLowerCase() === w)));
     });
-    return hits.length === 1 ? hits[0] : null;
+    if (hits.length || mode !== "record") return hits.length === 1 ? hits[0] : null;
+    const byValue = options.filter((o) => o.value && wants.includes(clean(o.value)));
+    return byValue.length === 1 ? byValue[0] : null;
   }
-  function setSelectStrict(f, wants) {
-    const o = selectOption(f, wants);
+  function setSelectStrict(f, wants, mode) {
+    const o = selectOption(f, wants, mode);
     if (!o) return false;
     f.value = o.value;
     fire(f);
@@ -1296,7 +1395,7 @@
     for (const f of root.querySelectorAll("input")) {
       const t = typeOf(f);
       if (!["text", "email", "tel"].includes(t) || f.disabled || f.readOnly || isCombo(f) || untouchable(f)) continue;
-      if (recordRoots.some((r) => r.contains(f)) || NOT_SELF.test(labelTexts(f).join(" "))) continue;
+      if (recordRoots.some((r) => r.contains(f)) || forSomeoneElse(f, root)) continue;
       const m = profileField(f, IDENTITY);
       if (!m) continue;
       const want = norm(p[m[0]]);
@@ -1352,7 +1451,7 @@
       edu = sectionRoots(EDU).filter((r) => root.contains(r));
     const recordRoots = [...work, ...edu];
     const onRecord = (f, v) => record(f, "record", v);
-    const strict = { isCurrent: strictCurrentBox, put: (f, key, v) => (f.tagName === "SELECT" ? setSelectStrict(f, variants(key, v)) : set(f, v)) };
+    const strict = { isCurrent: strictCurrentBox, put: (f, key, v) => (f.tagName === "SELECT" ? setSelectStrict(f, recordVariants(key, v), "record") : set(f, v)) };
     // The batch gate is wider than the manual one, so a record field asking about you personally is still left alone.
     fillSections(work, p.workHistory || [], onRecord, untouchable, strict);
     fillSections(edu, p.education || [], onRecord, untouchable, strict);
@@ -1363,8 +1462,7 @@
     const answerFor = (q) => {
       const aQ = AUTH_Q.test(q),
         sQ = SPON_Q.test(q);
-      if (!aQ && !sQ) return null;
-      if (OTHER_PLACE.test(q) || NOT_ELIGIBILITY.test(q) || (aQ && !WORK_AUTH_Q.test(q))) return null;
+      if ((!aQ && !sQ) || !usWorkQuestion(q, aQ)) return null;
       return eligibility(q, aQ, sQ, authorized, needsSponsor);
     };
     const skills = (Array.isArray(p.skills) ? p.skills : String(p.skills || "").split(","))
@@ -1377,7 +1475,9 @@
     for (const f of root.querySelectorAll("input,select,textarea")) {
       const t = typeOf(f);
       if (f.disabled || f.readOnly || ["hidden", "password", "submit", "button", "reset", "image", "file", "checkbox"].includes(t)) continue;
-      if (recordRoots.some((r) => r.contains(f)) && match(f, recordFields)) continue;
+      // Records never use radios, so a Yes/No question whose legend says "employment" (and so reads as a work
+      // section) is still answered here.
+      if (t !== "radio" && recordRoots.some((r) => r.contains(f)) && match(f, recordFields)) continue;
       if (untouchable(f)) continue;
       if (isCombo(f)) {
         if (!recordRoots.some((r) => r.contains(f))) combos.push(f);
@@ -1399,7 +1499,9 @@
       if (f.tagName === "TEXTAREA" && /cover.?letter/i.test(nameTexts(f))) continue;
       const lt = labelTexts(f).join(" ");
       // A text area is a question to answer in your own words, never a profile field.
-      const m = NOT_SELF.test(lt) || t === "textarea" ? undefined : profileField(f);
+      // So is a field for someone else's details, such as a reference's name or an emergency contact's phone.
+      const other = forSomeoneElse(f, root);
+      const m = other || t === "textarea" ? undefined : profileField(f);
       if (t === "select") {
         if (m) {
           const v = norm(p[m[0]]);
@@ -1407,7 +1509,7 @@
           continue;
         }
         const a = answerFor(question(f) || lt.toLowerCase());
-        if (typeof a === "boolean" && setSelectStrict(f, [a ? "yes" : "no"])) record(f, "eligibility");
+        if (typeof a === "boolean" && setSelectStrict(f, [a ? "yes" : "no"], "answer")) record(f, "eligibility");
         continue;
       }
       if (!TEXTLIKE.includes(t)) continue;
@@ -1416,6 +1518,7 @@
         if (v && setText(f, v)) record(f, "profile", v);
         continue;
       }
+      if (other) continue;
       if (skills && profileField(f, SKILLS)) {
         if (setText(f, skills)) record(f, "profile", skills);
         continue;
@@ -1427,7 +1530,7 @@
     for (const f of combos) {
       if (comboValue(f)) continue;
       const lt = labelTexts(f).join(" ");
-      if (NOT_SELF.test(lt)) continue;
+      if (forSomeoneElse(f, root)) continue;
       const m = profileField(f);
       let wants = null,
         source = "profile";
@@ -1498,16 +1601,19 @@
       if (seen.has(f)) continue;
       const t = typeOf(f);
       if (["hidden", "submit", "button", "reset", "image", "password"].includes(t)) continue;
-      if (f.tagName === "INPUT" && t === "radio") {
-        const group = groupOf(f).filter((x) => root.contains(x));
-        group.forEach((x) => seen.add(x));
-        out.push({ kind: "radio", els: group, first: f });
-        continue;
-      }
-      if (t === "checkbox" || t === "switch") {
-        const group = checkGroup(f, root).filter((x) => x === f || !seen.has(x));
-        group.forEach((x) => seen.add(x));
-        out.push({ kind: "check", els: group, first: f });
+      const options =
+        f.tagName === "INPUT" && t === "radio"
+          ? groupOf(f).filter((x) => root.contains(x))
+          : t === "checkbox" || t === "switch"
+            ? checkGroup(f, root).filter((x) => x === f || !seen.has(x))
+            : null;
+      if (options) {
+        options.forEach((x) => seen.add(x));
+        const asked = optionsQuestion(options, root);
+        // An "Other" text box answers the same question, so it is checked with it, not on its own.
+        if (asked?.companion && seen.has(asked.companion)) asked.companion = null;
+        if (asked?.companion) seen.add(asked.companion);
+        out.push({ kind: t === "radio" ? "radio" : "check", els: options, first: f, question: asked });
         continue;
       }
       seen.add(f);
@@ -1519,8 +1625,10 @@
   function unitText(u) {
     const f = u.first;
     if (u.kind === "pair") return u.pair.question;
-    if (u.kind === "radio") return [question(f), textOf(groupLabelEl(f)), ...u.els.flatMap(labelTexts)].join(" ");
-    if (u.kind === "check") return [...u.els.flatMap(labelTexts), question(f), textOf(groupLabelEl(f)), f.tagName === "INPUT" ? "" : textOf(f)].join(" ");
+    const asked = textOf(u.question?.label);
+    if (u.kind === "radio") return [question(f), textOf(groupLabelEl(f)), asked, ...u.els.flatMap(labelTexts)].join(" ");
+    if (u.kind === "check")
+      return [...u.els.flatMap(labelTexts), question(f), textOf(groupLabelEl(f)), asked, ...u.els.map((x) => (x.tagName === "INPUT" ? "" : textOf(x)))].join(" ");
     return [...labelTexts(f), question(f), f.tagName === "INPUT" ? "" : textOf(f)].join(" ");
   }
   // The group's required mark covers a checkbox question only when the group holds nothing else.
@@ -1531,15 +1639,16 @@
   function unitRequired(u) {
     if (u.kind === "pair") return u.pair.required;
     if (u.els.some(isRequired)) return true;
-    if (u.kind === "radio") return groupRequired(u.first);
-    if (u.kind === "check") return wholeGroup(u) && groupRequired(u.first);
+    if (u.kind === "radio") return groupRequired(u.first) || !!u.question?.required;
+    if (u.kind === "check") return (wholeGroup(u) && groupRequired(u.first)) || !!u.question?.required;
     if (u.kind === "file") return fileRequired(u.first);
     return false;
   }
   function unitChosen(u) {
     if (u.kind === "pair") return pairValue(u.pair);
-    if (u.kind === "radio") return u.els.find((x) => x.checked) || null;
-    if (u.kind === "check") return u.els.find(checkedOf) || null;
+    const other = u.question?.companion && norm(u.question.companion.value) ? u.question.companion : null;
+    if (u.kind === "radio") return u.els.find((x) => x.checked) || other;
+    if (u.kind === "check") return u.els.find(checkedOf) || other;
     return u.first;
   }
   function unitEmpty(u) {
@@ -1561,8 +1670,8 @@
   }
   function unitLabel(u) {
     if (u.kind === "pair") return u.pair.label;
-    const g = u.kind === "check" && (u.els.length > 1 || groupRequired(u.first)) ? textOf(groupLabelEl(u.first)).replace(/[\s*:✱]+$/, "") : "";
-    return clip(g || labelOf(u.first), 120);
+    const g = (u.kind === "check" && (u.els.length > 1 || groupRequired(u.first)) ? textOf(groupLabelEl(u.first)) : "") || textOf(u.question?.label);
+    return clip(g.replace(/[\s*:✱]+$/, "") || labelOf(u.first), 120);
   }
   function profileValues(p = {}) {
     const vals = [p.firstName, p.lastName, p.fullName, p.legalName, p.email, p.phone, p.city, p.state, p.postalCode, p.country, p.linkedIn];
@@ -1676,7 +1785,7 @@
   // Custom widgets ApplyPilot never fills: ARIA radio groups, rich text boxes, menu buttons, signature pads. Only
   // the outermost one that isn't part of a field already checked, or of a combobox or upload's own box.
   const WIDGETS =
-    "[aria-required=true],[role=radiogroup],[role=radio],[role=textbox],[role=listbox],[contenteditable=''],[contenteditable=true],button[aria-haspopup],canvas";
+    "[aria-required=true],[role=radiogroup],[role=radio],[role=textbox],[role=listbox],[contenteditable=''],[contenteditable=true],button[aria-haspopup],[role=button][aria-haspopup],[aria-haspopup=listbox],canvas";
   function widgetsIn(root, all) {
     const taken = all.flatMap((u) => u.els);
     const boxes = all.filter((u) => isCombo(u.first) || u.kind === "file").map((u) => fieldBox(u.first, root));
@@ -1708,7 +1817,7 @@
   function widgetShown(w) {
     if (w.tagName === "CANVAS") return [];
     if (typedWidget(w)) return [norm(w.innerText || w.textContent)].filter(Boolean);
-    if (w.tagName === "BUTTON") return [btnLabel(w)].filter((t) => t && !PLACEHOLDER.test(t));
+    if (w.tagName === "BUTTON" || w.getAttribute("role") === "button") return [btnLabel(w)].filter((t) => t && !PLACEHOLDER.test(t));
     if (w.matches(PICKED)) return [textOf(w) || "1"];
     const c = w.querySelector(PICKED);
     return c ? [textOf(c) || "1"] : [];
@@ -2064,6 +2173,7 @@
     );
   const noteSuccessBefore = () => {
     state.successBefore = successLines();
+    state.href = location.href;
   };
   function sawRoot() {
     if (!state.successBefore) noteSuccessBefore();
@@ -2076,6 +2186,9 @@
     return false;
   };
   function classify(adapter) {
+    // A route change inside the page (Ashby's Overview tab) shows text that was there all along, such as "every
+    // application received is reviewed"; it is never new success wording.
+    if (location.href !== state.href && state.successBefore) noteSuccessBefore();
     const text = pageText();
     if (captchaState().challenge || CODE_STEP.test(text))
       return { outcome: "check", code: "challenge", reason: "A CAPTCHA or verification step appeared after Submit" };
@@ -2176,11 +2289,13 @@
         true,
       );
     }
+    // Without the site's confirmation URL, success shown in the page counts only after a real Submit click in this
+    // page, yours or ApplyPilot's: a needs-you tab where you open the job's Overview never reads as sent.
     observeOutcome(
       adapter,
       (r) => post("confirmed", { text: r.confirmationText, confirmationKind: r.confirmationKind }),
       0,
-      (r) => r.outcome === "submitted",
+      (r) => r.outcome === "submitted" && (r.confirmationKind === "url" || alreadyClicked()),
     );
     return { watching: true };
   }

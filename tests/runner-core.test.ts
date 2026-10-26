@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  KEYS, acceptBatch, ackResults, cancelJobs, cleanup, createRunner, heldSummary, pullResults, validateJob,
+  KEYS, acceptBatch, ackResults, cancelJobs, cleanup, createRunner, focusJobTab, forgetTabs, heldSummary, pullResults, validateJob,
 } from '../extension/runner-core.js';
 
 // Fakes are loosely typed on purpose: they stand in for chrome.* objects.
@@ -792,6 +792,57 @@ test('a watched needs-you tab that you submit yourself is recorded as a second r
   }
 });
 
+test('your own Submit click in a watched needs-you tab locks the job and asks you to check it, with no confirmation seen', async () => {
+  const s = await setup({ autoAck: true });
+  const [job] = s.jobs;
+  s.scripting.handlers.audit = () => ({ fingerprint: 'fp-1', blockers: [{ code: 'unanswered_required', text: 'Needs your answer: Start date' }], relaxations: [], report: [], submit: null });
+  await s.runner.recover();
+  await s.runner.run({ countdown: false });
+  const tabId = s.job(job.approvalId).tabId;
+  assert.equal(s.runner.onPageEvent({ kind: 'peter_click', matches: false }, { tab: { id: tabId }, url: job.applyUrls[0] }), true);
+  await until(() => s.delivered.length === 2, 'the check result');
+  const check = s.delivered[1];
+  assert.deepEqual([check.outcome, check.clickedBy, check.clicked], ['check', 'you', false]);
+  assert.equal(check.reasons[0].code, 'you_clicked');
+  assert.equal(s.job(job.approvalId).state, 'done:check');
+  assert.equal(s.storage.data.get(KEYS.ledger(job.jobKey)).mode, 'you');
+  assert.equal(s.storage.data.get(KEYS.watch(tabId)).peterClicked, true);
+  // A second click (the form showed an error, you fixed it) reports nothing new.
+  s.runner.onPageEvent({ kind: 'peter_click', matches: false }, { tab: { id: tabId }, url: job.applyUrls[0] });
+  await tick(20);
+  assert.equal(s.delivered.length, 2);
+
+  // The site's wording isn't one ApplyPilot knows, so no confirmation comes; you close the tab.
+  await s.tabs.remove(tabId);
+  s.runner.onTabRemoved(tabId);
+  await tick(20);
+  s.scripting.handlers.audit = () => ({ fingerprint: 'fp-1', blockers: [], relaxations: [], submit: { path: '#btn-submit', label: 'Submit application' }, report: [] });
+  const again = makeJob({ jobKey: job.jobKey, applyUrls: job.applyUrls, applicationId: job.applicationId });
+  const r = await acceptBatch(s.storage, { jobs: [again] }, { now: T0, sha256 });
+  assert.equal(r.accepted.length, 0);
+  assert.match(r.rejected[0].reason, /already submitted in Chrome/);
+  // After you say "It didn't go through", only the approval that replaces that one may run.
+  const after = makeJob({ jobKey: job.jobKey, applyUrls: job.applyUrls, applicationId: job.applicationId, supersedesId: job.approvalId });
+  assert.deepEqual((await acceptBatch(s.storage, { jobs: [after] }, { now: T0, sha256 })).accepted, [after.approvalId]);
+});
+
+test('a confirmation after your click in a needs-you tab is recorded as sent by you', async () => {
+  const s = await setup();
+  const [job] = s.jobs;
+  s.scripting.handlers.audit = () => ({ fingerprint: 'fp-1', blockers: [{ code: 'unanswered_required', text: 'Needs your answer: Start date' }], relaxations: [], report: [], submit: null });
+  await s.runner.recover();
+  await s.runner.run({ countdown: false });
+  const tabId = s.job(job.approvalId).tabId;
+  const thanks = job.applyUrls[0].replace(/\/apply$/, '/thanks');
+  s.runner.onPageEvent({ kind: 'peter_click', matches: false }, { tab: { id: tabId }, url: job.applyUrls[0] });
+  s.runner.onPageEvent({ kind: 'confirmed', text: 'Thank you for applying.' }, { tab: { id: tabId }, url: thanks });
+  await until(async () => (await s.results()).length === 3, 'the click and the confirmation');
+  assert.deepEqual((await s.results()).map((r: Json) => [r.outcome, r.clickedBy]), [['needs_you', ''], ['check', 'you'], ['submitted', 'you']]);
+  assert.equal(s.job(job.approvalId).state, 'done:submitted');
+  assert.equal(s.storage.data.get(KEYS.ledger(job.jobKey)).outcome, 'submitted');
+  assert.equal(s.storage.data.has(KEYS.watch(tabId)), false);
+});
+
 test('a check tab ApplyPilot clicked that confirms late is credited to ApplyPilot, unless you pressed Submit there', async () => {
   for (const youClicked of [false, true]) {
     const s = await setup();
@@ -894,7 +945,7 @@ test('re-sending an accepted job is a no-op', async () => {
   assert.deepEqual(r, { accepted: [s.jobs[0].approvalId], rejected: [] });
 });
 
-test('a saved tab id that now shows another page is not the job\'s tab: recovery neither closes nor watches it', async () => {
+test('a saved tab id that now shows another page is not the job\'s tab: recovery never closes it, and Chrome starting forgets every saved id', async () => {
   const s = await setup();
   const [job] = s.jobs;
   // After a browser restart Chrome hands the same ids to unrelated tabs.
@@ -902,12 +953,107 @@ test('a saved tab id that now shows another page is not the job\'s tab: recovery
   const other = await s.tabs.create({ url: `https://jobs.lever.co/acme/${randomUUID()}/apply` });
   s.patchJob(job.approvalId, { state: 'auditing', tabId: unrelated.id });
   s.storage.data.set(KEYS.watch(other.id), { approvalId: randomUUID(), jobKey: job.jobKey, ats: 'lever', kind: 'needs_you', since: iso(T0) });
+  await forgetTabs(s.storage);
+  assert.equal(s.job(job.approvalId).tabId, null);
+  assert.equal(s.storage.data.has(KEYS.watch(other.id)), false);
   const runner = s.make();
   await runner.recover();
   assert.equal(s.job(job.approvalId).state, 'queued');
   assert.deepEqual(s.tabs.removed, [], 'nothing of yours is closed');
-  assert.equal(s.storage.data.has(KEYS.watch(other.id)), false);
   assert.equal(runner.onPageEvent({ kind: 'confirmed' }, { tab: { id: other.id }, url: job.applyUrls[0].replace(/\/apply$/, '/thanks') }), false);
+  // In the same browser session a half-filled job's tab that you took elsewhere is left open too.
+  const t = await setup();
+  const [job2] = t.jobs;
+  const elsewhere = await t.tabs.create({ url: 'https://news.example.com/today' });
+  t.patchJob(job2.approvalId, { state: 'claiming', tabId: elsewhere.id, attemptId: randomUUID() });
+  await t.make().recover();
+  assert.equal(t.job(job2.approvalId).state, 'queued');
+  assert.deepEqual(t.tabs.removed, []);
+});
+
+const tabUrlOf = (s: Json) => async (id: number) => {
+  try {
+    return (await s.tabs.get(id)).url ?? '';
+  } catch {
+    return null;
+  }
+};
+
+test('a needs-you tab you took to another page still holds the job: a re-approval waits until that tab closes', async () => {
+  const s = await setup({ autoAck: true });
+  const [job] = s.jobs;
+  s.scripting.handlers.audit = () => ({ fingerprint: 'fp-1', blockers: [{ code: 'unanswered_required', text: 'Needs your answer: Start date' }], relaxations: [], report: [], submit: null });
+  await s.runner.recover();
+  await s.runner.run({ countdown: false });
+  const tabId = s.job(job.approvalId).tabId;
+  // You open the company's other jobs from the posting, in that same tab.
+  s.tabs.open.get(tabId).url = 'https://jobs.lever.co/acme';
+  const B = makeJob({ jobKey: job.jobKey, applyUrls: job.applyUrls });
+  const refused = await acceptBatch(s.storage, { jobs: [B] }, { now: T0, sha256, tabUrl: tabUrlOf(s) } as Json);
+  assert.match(refused.rejected[0]?.reason ?? '', /open in a tab/);
+  assert.ok(s.storage.data.has(KEYS.watch(tabId)));
+  // A re-approval that got in anyway is stopped at the gate before it opens.
+  const watch = s.storage.data.get(KEYS.watch(tabId));
+  s.storage.data.delete(KEYS.watch(tabId));
+  assert.deepEqual((await acceptBatch(s.storage, { jobs: [B] }, { now: T0, sha256 })).accepted, [B.approvalId]);
+  s.storage.data.set(KEYS.watch(tabId), watch);
+  s.scripting.handlers.audit = () => ({ fingerprint: 'fp-1', blockers: [], relaxations: [], submit: { path: '#btn-submit', label: 'Submit application' }, report: [] });
+  const created = s.tabs.created.length;
+  await s.runner.run({ countdown: false });
+  assert.equal(s.job(B.approvalId).state, 'done:needs_you');
+  assert.equal(s.job(B.approvalId).reasons[0].code, 'open_tab');
+  assert.equal(s.tabs.created.length, created);
+  assert.equal(pageCalls(s, 'pressSubmit'), 0);
+  // Once you close it, the job can be approved again.
+  await s.tabs.remove(tabId);
+  await tick(10);
+  const C = makeJob({ jobKey: job.jobKey, applyUrls: job.applyUrls });
+  assert.deepEqual((await acceptBatch(s.storage, { jobs: [C] }, { now: T0, sha256, tabUrl: tabUrlOf(s) } as Json)).accepted, [C.approvalId]);
+});
+
+test('a supervised wait outlives a runner restart while you have its tab on another page, and your submission there is yours', async () => {
+  const s = await setup({ claims: [{ ok: true, mode: 'supervised' }], hang: (ms) => ms >= 25 * 60_000 });
+  const [job] = s.jobs;
+  await s.runner.recover();
+  void s.runner.run({ countdown: false });
+  await until(() => s.job(job.approvalId)?.state === 'waiting_for_you', 'the supervised wait');
+  const tabId = s.job(job.approvalId).tabId;
+  s.tabs.open.get(tabId).url = 'https://jobs.lever.co/acme';
+  const again = s.make();
+  await again.recover();
+  assert.equal(s.job(job.approvalId).state, 'waiting_for_you');
+  assert.ok(s.storage.data.has(KEYS.watch(tabId)));
+  assert.equal((await s.results()).length, 0);
+  // You go back to the form in that tab and submit it.
+  s.tabs.open.get(tabId).url = job.applyUrls[0];
+  const thanks = job.applyUrls[0].replace(/\/apply$/, '/thanks');
+  assert.equal(again.onPageEvent({ kind: 'confirmed', text: 'Thank you for applying.' }, { tab: { id: tabId }, url: thanks }), true);
+  await until(async () => (await s.results()).length === 1, 'your submission');
+  const [r] = await s.results();
+  assert.deepEqual([r.outcome, r.clickedBy, r.clicked], ['submitted', 'you', false]);
+  assert.equal(s.storage.data.get(KEYS.ledger(job.jobKey)).mode, 'you');
+});
+
+test('"Show tab" focuses a job\'s saved tab only while it still shows that job', async () => {
+  const s = await setup();
+  const [job] = s.jobs;
+  const focused: Json[] = [];
+  const chromeLike = {
+    tabs: { get: (id: number) => s.tabs.get(id), update: async (id: number) => (focused.push(['tab', id]), s.tabs.update(id)) },
+    windows: { update: async (id: number) => void focused.push(['window', id]) },
+  };
+  const tab = await s.tabs.create({ url: job.applyUrls[0] });
+  s.patchJob(job.approvalId, { state: 'done:check', tabId: tab.id });
+  assert.deepEqual(await focusJobTab(s.storage, chromeLike, job.approvalId), { ok: true });
+  assert.deepEqual(focused, [['tab', tab.id], ['window', 1]]);
+  focused.length = 0;
+  // The same id on another page (after a restart, an unrelated tab) is not this job's tab.
+  s.tabs.open.get(tab.id).url = 'https://news.example.com/today';
+  assert.deepEqual(await focusJobTab(s.storage, chromeLike, job.approvalId), { ok: false });
+  await s.tabs.remove(tab.id);
+  assert.deepEqual(await focusJobTab(s.storage, chromeLike, job.approvalId), { ok: false });
+  assert.deepEqual(await focusJobTab(s.storage, chromeLike, randomUUID()), { ok: false });
+  assert.deepEqual(focused, []);
 });
 
 test('a watch whose tab closed while the runner was shut is dropped when the next batch arrives', async () => {
@@ -917,6 +1063,10 @@ test('a watch whose tab closed while the runner was shut is dropped when the nex
   const withTab = (url: string | null): Json => ({ now: T0, sha256, tabUrl: async () => url });
   const kept = await acceptBatch(s.storage, { jobs: [job] }, withTab(job.applyUrls[0]));
   assert.match(kept.rejected[0]?.reason ?? '', /open in a tab/, 'still open on that job: refused');
+  for (const url of ['https://jobs.lever.co/acme', '']) {
+    const elsewhere = await acceptBatch(s.storage, { jobs: [job] }, withTab(url));
+    assert.match(elsewhere.rejected[0]?.reason ?? '', /open in a tab/, `still open, on ${url || 'a page Chrome does not name'}: refused`);
+  }
   const r = await acceptBatch(s.storage, { jobs: [job] }, withTab(null));
   assert.deepEqual(r, { accepted: [job.approvalId], rejected: [] });
   assert.equal(s.storage.data.has(KEYS.watch(555)), false);

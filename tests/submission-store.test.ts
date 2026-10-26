@@ -467,6 +467,28 @@ test('results: a watched tab records your own submission from needs_you, revoked
   assert.equal(appStatus(sqlite, 'r'), 'applied');
 });
 
+test('results: your own Submit click in a needs-you tab moves it to check and withdraws a newer approval of the job', async () => {
+  const { sqlite, db } = setup();
+  addApp(sqlite, 'a1', ghUrl(1));
+  const first = await approveOne(db, 'a1');
+  await recordResults(db, OWNER, [resultOf(first, null, 'needs_you')], NOW);
+  const second = await approveOne(db, 'a1', NOW + MIN);
+  const clickedBy = (who: string) => resultOf(first, null, 'check', { clicked: false, clickedBy: who, reasons: [{ code: 'you_clicked', text: 'You clicked Submit in the open tab.' }] });
+  // Only your own click counts; nothing ApplyPilot reports without a claim moves a needs-you row.
+  await recordResults(db, OWNER, [resultOf(first, null, 'check')], NOW + 2 * MIN);
+  assert.equal(state(sqlite, first.approvalId), 'needs_you');
+  await recordResults(db, OWNER, [clickedBy('you')], NOW + 2 * MIN);
+  assert.equal(state(sqlite, first.approvalId), 'check');
+  assert.equal(state(sqlite, second.approvalId), 'revoked');
+  assert.equal((sqlite.prepare('SELECT clicked_by FROM submissions WHERE id = ?').get(first.approvalId) as { clicked_by: string }).clicked_by, 'you');
+  const blocked = await approveForSubmit(db, OWNER, [{ applicationId: 'a1', revision: 1 }], { includeCoverLetter: true, now: NOW + 3 * MIN });
+  assert.equal(blocked.skipped[0]?.code, 'in_progress');
+  // "It didn't go through": the next approval replaces that one, so Chrome lets it past its record of your click.
+  await resolveSubmission(db, OWNER, first.approvalId, 'not_sent', NOW + 4 * MIN);
+  const third = await approveOne(db, 'a1', NOW + 5 * MIN);
+  assert.equal(third.supersedesId, first.approvalId);
+});
+
 test('resolve works only on check rows or stale claims: 15 minutes, or 35 for a supervised claim waiting on your click', async () => {
   const { sqlite, db } = setup();
   for (const id of ['a', 'b', 'c']) addApp(sqlite, id, ghUrl(id.charCodeAt(0)));
@@ -552,6 +574,50 @@ test('the same claim sent twice (Chrome tried another dashboard tab) gets the sa
   assert.deepEqual(late, { ok: false, reason: 'attempt_closed' });
   assert.equal(state(sqlite, item.approvalId), 'approved');
   assert.equal((await claimSubmission(db, OWNER, claimOf(item), NOW + 3 * MIN)).ok, true, 'a new attempt may claim it');
+});
+
+test('the same claim racing itself (both copies read before either writes) is granted to both, with one claimed event', async () => {
+  const { sqlite, db } = setup();
+  addApp(sqlite, 'a', ghUrl(1));
+  const item = await approveOne(db, 'a');
+  const req = claimOf(item);
+  // The first copy's write waits until the second copy has read the row as approved.
+  let readSecond!: () => void;
+  const secondRead = new Promise<void>((r) => (readSecond = r));
+  const db1 = { ...db, batch: async (s: never) => { await secondRead; return db.batch(s); } };
+  const first = claimSubmission(db1 as never, OWNER, req, NOW);
+  const db2 = { ...db, batch: async (s: never) => { readSecond(); await first; return db.batch(s); } };
+  const second = claimSubmission(db2 as never, OWNER, req, NOW + 50);
+  assert.deepEqual(await Promise.all([first, second]), [{ ok: true, mode: 'supervised' }, { ok: true, mode: 'supervised' }]);
+  assert.equal(state(sqlite, item.approvalId), 'claimed');
+  assert.deepEqual(events(sqlite, item.approvalId), ['approved', 'claimed']);
+  // A different attempt in the same race is still refused.
+  addApp(sqlite, 'b', ghUrl(2));
+  const b = await approveOne(db, 'b');
+  const [one, other] = [claimOf(b), claimOf(b)];
+  let readOther!: () => void;
+  const otherRead = new Promise<void>((r) => (readOther = r));
+  const dbA = { ...db, batch: async (s: never) => { await otherRead; return db.batch(s); } };
+  const winner = claimSubmission(dbA as never, OWNER, one, NOW);
+  const dbB = { ...db, batch: async (s: never) => { readOther(); await winner; return db.batch(s); } };
+  const loser = claimSubmission(dbB as never, OWNER, other, NOW + 50);
+  assert.deepEqual(await Promise.all([winner, loser]), [{ ok: true, mode: 'supervised' }, { ok: false, reason: 'already_claimed' }]);
+});
+
+test('"Stop everything" while a claim commits between its read and its write: the claim given back comes back cancelled', async () => {
+  const { sqlite, db } = setup();
+  addApp(sqlite, 'a', ghUrl(1));
+  const item = await approveOne(db, 'a');
+  const req = claimOf(item);
+  let granted: ClaimResult | undefined;
+  // cancel has read the row as approved; Chrome's claim commits before cancel's batch runs.
+  const racing = { ...db, batch: async (s: never) => { granted = await claimSubmission(db, OWNER, req, NOW + 10); return db.batch(s); } };
+  assert.deepEqual(await cancelSubmissions(racing as never, OWNER, 'all', NOW + 20), { revoked: [], tooLate: [item.approvalId] });
+  assert.deepEqual(granted, { ok: true, mode: 'supervised' });
+  assert.deepEqual(events(sqlite, item.approvalId), ['approved', 'claimed', 'cancel_requested']);
+  await recordResults(db, OWNER, [resultOf(item, req.attemptId, 'not_clicked')], NOW + 2000);
+  assert.equal(state(sqlite, item.approvalId), 'revoked');
+  assert.deepEqual(await claimSubmission(db, OWNER, claimOf(item), NOW + 10 * MIN), { ok: false, reason: 'revoked' });
 });
 
 test('"Stop everything" during a claim: when Chrome gives the claim back, it comes back cancelled', async () => {

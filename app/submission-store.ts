@@ -462,16 +462,20 @@ function deniedEvent(db: SqlDatabase, owner: string, req: ClaimRequest, denial: 
       detailJson({ attemptId: req.attemptId, reason: denial.reason, retryAfterSec: denial.retryAfterSec, resetAt: denial.resetAt }));
 }
 
+// The same attempt again (Chrome tried another dashboard tab after no answer) gets the answer it was given.
+function sameAttempt(f: ClaimFacts | null, req: ClaimRequest): ClaimResult | null {
+  if (f?.sub_state !== "claimed" || f.sub_attempt_id !== req.attemptId) return null;
+  if (f.sub_application_id !== req.applicationId || f.sub_job_key !== req.jobKey) return null;
+  return f.sub_claim_mode === "auto" || f.sub_claim_mode === "supervised" ? { ok: true, mode: f.sub_claim_mode } : null;
+}
+
 export async function claimSubmission(db: SqlDatabase, owner: string, input: unknown, now = Date.now()): Promise<ClaimResult> {
   const req = checkClaim(input);
   if (!req) return { ok: false, reason: "invalid_request" };
   const nowIso = iso(now);
   const facts = await claimFacts(db, owner, req, now);
-  // The same attempt again (Chrome tried another dashboard tab after no answer) gets the answer it was given.
-  if (facts?.sub_state === "claimed" && facts.sub_attempt_id === req.attemptId && facts.sub_application_id === req.applicationId &&
-    facts.sub_job_key === req.jobKey && (facts.sub_claim_mode === "auto" || facts.sub_claim_mode === "supervised")) {
-    return { ok: true, mode: facts.sub_claim_mode };
-  }
+  const again = sameAttempt(facts, req);
+  if (again) return again;
   const settings = parseSettings(facts?.apply_settings_json);
   const currentHash = profileReady(facts) ? await hashOfRow(facts) : "";
   const ats = facts && isAts(facts.sub_ats) ? facts.sub_ats : null;
@@ -509,11 +513,13 @@ export async function claimSubmission(db: SqlDatabase, owner: string, input: unk
         mode, owner, iso(now - DAY_MS), settings.dailyCap, owner, iso(now - AUTO_SPACING_MS)),
     db.prepare(`INSERT INTO submission_events (id, owner_email, submission_id, at, actor, event, detail_json)
       SELECT ?, ?, ?, ?, 'extension', 'claimed', ?
-      WHERE EXISTS (SELECT 1 FROM submissions WHERE id = ? AND owner_email = ? AND attempt_id = ? AND state = 'claimed')`)
+      WHERE EXISTS (SELECT 1 FROM submissions WHERE id = ? AND owner_email = ? AND attempt_id = ? AND state = 'claimed')
+        AND NOT EXISTS (SELECT 1 FROM submission_events e WHERE e.owner_email = ? AND e.submission_id = ? AND e.event = 'claimed'
+          AND json_extract(e.detail_json, '$.attemptId') = ?)`)
       .bind(crypto.randomUUID(), owner, req.approvalId, nowIso,
         detailJson({ attemptId: req.attemptId, mode, relaxations: req.relaxations, resumeSha256: req.resumeSha256,
           resumeFilename: req.resumeFilename, fingerprint: req.fingerprint, pageUrl: req.pageUrl, extensionVersion: req.extensionVersion }),
-        req.approvalId, owner, req.attemptId),
+        req.approvalId, owner, req.attemptId, owner, req.approvalId, req.attemptId),
     // Something changed between the read and the write (usually a second claim on the same approval).
     db.prepare(`INSERT INTO submission_events (id, owner_email, submission_id, at, actor, event, detail_json)
       SELECT ?, ?, ?, ?, 'extension', 'claim_denied', ?
@@ -522,7 +528,9 @@ export async function claimSubmission(db: SqlDatabase, owner: string, input: unk
         req.approvalId, owner, req.attemptId),
   ]);
   if (results[2]?.meta.changes === 1) return { ok: true, mode };
-  return denialFrom(await claimFacts(db, owner, req, now), req, settings, mode, currentHash, now) ?? { ok: false, reason: "already_claimed" };
+  // The same attempt sent twice can lose this race to itself: both read 'approved', and the other copy wrote first.
+  const after = await claimFacts(db, owner, req, now);
+  return sameAttempt(after, req) ?? denialFrom(after, req, settings, mode, currentHash, now) ?? { ok: false, reason: "already_claimed" };
 }
 
 const oneOf = <T extends string>(value: unknown, options: readonly T[]): value is T => options.includes(value as T);
@@ -607,11 +615,29 @@ function transition(db: SqlDatabase, owner: string, r: SubmissionResult, nowIso:
         ...keys, r.attemptId)];
   }
   if (r.outcome === "check") {
-    return [db.prepare(`UPDATE submissions SET state = 'check', reason = ?, reasons_json = ?, clicked_by = ?, page_url = ?,
-        confirmation_text = ?, finished_at = ?, extension_version = ?, updated_at = ?
-      WHERE ${target} AND state = 'claimed' AND attempt_id = ?`)
-      .bind(firstReason || "Submit pressed, no confirmation seen", reasons, r.clickedBy, r.pageUrl, r.confirmationText, r.finishedAt,
-        r.extensionVersion, nowIso, ...keys, r.attemptId)];
+    const update = (from: string, ...fromArgs: unknown[]) =>
+      db.prepare(`UPDATE submissions SET state = 'check', reason = ?, reasons_json = ?, clicked_by = ?, page_url = ?,
+          confirmation_text = ?, finished_at = ?, extension_version = ?, updated_at = ?
+        WHERE ${target} AND ${from}`)
+        .bind(firstReason || "Submit pressed, no confirmation seen", reasons, r.clickedBy, r.pageUrl, r.confirmationText, r.finishedAt,
+          r.extensionVersion, nowIso, ...keys, ...fromArgs);
+    const fromClaim = update("state = 'claimed' AND attempt_id = ?", r.attemptId);
+    if (r.clickedBy !== "you") return [fromClaim];
+    // You pressed Submit yourself in a needs-you tab. That may have sent it, so the job waits for your answer instead
+    // of being offered for approval again, and a newer approval of it is withdrawn.
+    const others = `owner_email = ? AND job_key = ? AND id != ? AND state = 'approved'
+      AND EXISTS (SELECT 1 FROM submissions WHERE ${target} AND state = 'needs_you')`;
+    const othersArgs = [owner, r.jobKey, r.approvalId, ...keys];
+    return [
+      fromClaim,
+      db.prepare(`INSERT OR IGNORE INTO submission_events (id, owner_email, submission_id, at, actor, event, detail_json)
+        SELECT id || ':revoked', owner_email, id, ?, 'server', 'revoked', '{"reason":"You clicked Submit in the open tab"}'
+        FROM submissions WHERE ${others}`).bind(nowIso, ...othersArgs),
+      db.prepare(`UPDATE submissions SET state = 'revoked', reason = 'You clicked Submit in the open tab', updated_at = ? WHERE ${others}`)
+        .bind(nowIso, ...othersArgs),
+      update(`state = 'needs_you' AND NOT EXISTS (SELECT 1 FROM submissions x WHERE x.owner_email = ? AND x.job_key = ? AND x.id != ?
+        AND x.state IN ('approved','claimed','check'))`, owner, r.jobKey, r.approvalId),
+    ];
   }
   if (r.outcome === "not_clicked") {
     // "Stop everything" while this claim was out: the claim comes back cancelled, never approved again.
@@ -701,7 +727,15 @@ export async function cancelSubmissions(db: SqlDatabase, owner: string, ids: rea
     if (cancelAsks.length) await db.batch(cancelAsks);
     return { revoked: [] as string[], tooLate };
   }
-  const results = await db.batch([...cancelAsks, ...pending.flatMap((id) => revoke(db, owner, id, "Cancelled by you", "peter", nowIso))]);
+  // A pending row claimed between the read and this batch gets the same cancel marker, so a claim given back
+  // comes back cancelled. The markers go last so the revoke results keep their places.
+  const lateAsks = pending.map((id) =>
+    db.prepare(`INSERT OR IGNORE INTO submission_events (id, owner_email, submission_id, at, actor, event, detail_json)
+      SELECT id || ':cancel:' || attempt_id, owner_email, id, ?, 'peter', 'cancel_requested', json_object('attemptId', attempt_id)
+      FROM submissions WHERE id = ? AND owner_email = ? AND state = 'claimed' AND attempt_id IS NOT NULL`)
+      .bind(nowIso, id, owner));
+  const revokes = pending.flatMap((id) => revoke(db, owner, id, "Cancelled by you", "peter", nowIso));
+  const results = await db.batch([...cancelAsks, ...revokes, ...lateAsks]);
   const revoked = pending.filter((_, index) => results[cancelAsks.length + index * 2 + 1]?.meta.changes === 1);
   // A row that moved on between the read and the write was claimed (or expired) in the meantime.
   tooLate.push(...pending.filter((id) => !revoked.includes(id)));

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { alreadySubmittedReason, checkText, isStaleClaim, pillLabel, resumeNotice, staleText, submittedLabel } from '../app/submit-pill.ts';
+import { alreadySubmittedReason, checkText, isStaleClaim, pillLabel, resumeNotice, staleText, submittedLabel, tabGoneText } from '../app/submit-pill.ts';
 
 const NOW = Date.parse('2026-10-26T12:00:00Z');
 const MIN = 60_000;
@@ -31,6 +31,13 @@ test('the check text says who clicked Submit', () => {
   assert.match(checkText({ clickedBy: 'you' }), /^You clicked Submit/);
   assert.match(checkText({ clickedBy: 'applypilot' }), /^ApplyPilot clicked Submit/);
   assert.equal(pillLabel(row({ state: 'check', clickedBy: 'you' }), NOW), 'Check this');
+});
+
+test('"Show tab" with the tab gone points only to what that row offers', () => {
+  // Open application is shown on needs-you rows only; a check row has "It went through" and "It didn't go through".
+  assert.match(tabGoneText('needs_you'), /Use Open application instead/);
+  assert.doesNotMatch(tabGoneText('check'), /Open application/);
+  assert.match(tabGoneText('check'), /confirmation email/);
 });
 
 test('sent and already-submitted wording follows who sent it', () => {

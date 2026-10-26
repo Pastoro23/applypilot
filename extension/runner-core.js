@@ -251,7 +251,8 @@ export async function validateJob(job, { now, sha256, ledger, watchedKeys, sent 
 }
 
 // tabUrl(tabId) gives a tab's URL, or null when the tab is gone. A watch whose tab closed while the runner
-// wasn't open is dropped here, so it can't refuse a job forever.
+// wasn't open is dropped here, so it can't refuse a job forever. A tab still open on any page keeps its watch:
+// you may go back to the form there and submit it.
 export async function acceptBatch(storage, batch, { now, sha256, tabUrl = null }) {
   const accepted = [];
   const rejected = [];
@@ -263,12 +264,9 @@ export async function acceptBatch(storage, batch, { now, sha256, tabUrl = null }
   const watchedKeys = new Set();
   for (const [key, w] of Object.entries(all || {})) {
     if (!key.startsWith("apWatch:") || !isObject(w)) continue;
-    if (tabUrl) {
-      const url = await tabUrl(Number(key.slice("apWatch:".length)));
-      if (typeof url !== "string" || !isAllowedUrl(url) || parseAtsUrl(url)?.jobKey !== w.jobKey) {
-        stale.push(key);
-        continue;
-      }
+    if (tabUrl && typeof (await tabUrl(Number(key.slice("apWatch:".length)))) !== "string") {
+      stale.push(key);
+      continue;
     }
     watchedKeys.add(w.jobKey);
   }
@@ -363,6 +361,36 @@ export async function ackResults(storage, resultIds, now) {
   }
   await cleanup(storage, now);
   return { acked };
+}
+
+// Chrome gives tab ids out again after it restarts, so background.js forgets every saved one when Chrome
+// starts. Within one browser session an id is that tab's for as long as it is open.
+export async function forgetTabs(storage) {
+  const all = (await storage.get(null)) || {};
+  const watches = Object.keys(all).filter((k) => k.startsWith("apWatch:"));
+  const writes = {};
+  for (const [key, rec] of Object.entries(all)) {
+    if (key.startsWith("apJob:") && isObject(rec) && rec.tabId != null) writes[key] = { ...rec, tabId: null };
+  }
+  if (watches.length) await storage.remove(watches);
+  if (Object.keys(writes).length) await storage.set(writes);
+}
+
+// "Show tab" on the dashboard: a job's saved tab is brought forward only while it still shows that job.
+export async function focusJobTab(storage, { tabs, windows }, approvalId) {
+  if (typeof approvalId !== "string") return { ok: false };
+  const key = KEYS.job(approvalId);
+  const rec = (await storage.get(key))[key];
+  if (!isObject(rec) || typeof rec.tabId !== "number" || typeof rec.job?.jobKey !== "string") return { ok: false };
+  try {
+    const tab = await tabs.get(rec.tabId);
+    if (!tab || typeof tab.url !== "string" || !isAllowedUrl(tab.url) || parseAtsUrl(tab.url)?.jobKey !== rec.job.jobKey) return { ok: false };
+    await tabs.update(rec.tabId, { active: true });
+    if (typeof tab.windowId === "number") await windows.update(tab.windowId, { focused: true });
+    return { ok: true };
+  } catch {
+    return { ok: false };
+  }
 }
 
 export async function cleanup(storage, now) {
@@ -518,8 +546,8 @@ export function createRunner(deps, opts = {}) {
     }
   }
   const closeTab = (tabId) => (typeof tabId === "number" ? quiet(tabs.remove(tabId)) : Promise.resolve());
-  // A saved tab id is that job's tab only while it shows that job: after a restart Chrome reuses ids.
-  async function liveTab(tabId, jobKey) {
+  // ApplyPilot closes a saved tab only while it shows that job, never one you took to another page.
+  async function showsJob(tabId, jobKey) {
     const t = await tabInfo(tabId);
     return Boolean(t && typeof t.url === "string" && isAllowedUrl(t.url) && parseAtsUrl(t.url)?.jobKey === jobKey);
   }
@@ -1071,7 +1099,7 @@ export function createRunner(deps, opts = {}) {
       const refusal = ledgerRefusal(all[KEYS.ledger(j.jobKey)], j, sentApprovals(all));
       if (refusal) return await finish(rec, "needs_you", { reasons: [R("already_clicked", refusal)], tabId: null });
       for (const [watchedTab, w] of watches) {
-        if (w.jobKey === j.jobKey && w.approvalId !== id && (await liveTab(watchedTab, w.jobKey))) {
+        if (w.jobKey === j.jobKey && w.approvalId !== id && (await tabInfo(watchedTab))) {
           return await finish(rec, "needs_you", { reasons: [R("open_tab", REJECT.watch)], tabId: null });
         }
       }
@@ -1158,7 +1186,7 @@ export function createRunner(deps, opts = {}) {
   async function resumeWaiting(rec) {
     const tabId = rec.tabId;
     current.tabId = tabId;
-    if (!(await liveTab(tabId, rec.job.jobKey))) {
+    if (!(await tabInfo(tabId))) {
       return finish(rec, "needs_you", { reasons: [R("tab_closed", "Tab closed before you submitted")], attemptId: rec.attemptId, tabId: null });
     }
     if (await isHalted()) {
@@ -1250,23 +1278,23 @@ export function createRunner(deps, opts = {}) {
     for (const [key, w] of Object.entries(all)) {
       if (!key.startsWith("apWatch:") || !isObject(w)) continue;
       const tabId = Number(key.slice("apWatch:".length));
-      if (await liveTab(tabId, w.jobKey)) watches.set(tabId, w);
+      if (await tabInfo(tabId)) watches.set(tabId, w);
       else await quiet(storage.remove(key));
     }
     for (const rec of valuesWith(all, "apJob:")) {
       const id = rec.job?.approvalId;
       if (!id) continue;
       const marked = Boolean(all[KEYS.cancel(id)]);
-      const tabAlive = await liveTab(rec.tabId, rec.job.jobKey);
+      const tabAlive = Boolean(await tabInfo(rec.tabId));
       if (PENDING.has(rec.state)) {
         if (marked) await markCancelled(rec);
       } else if (["opening", "filling", "auditing"].includes(rec.state)) {
         // Nothing was clicked: start this one again from the beginning.
-        if (tabAlive) await closeTab(rec.tabId);
+        if (await showsJob(rec.tabId, rec.job.jobKey)) await closeTab(rec.tabId);
         await saveJob(rec, { state: marked ? "cancelled" : "queued", tabId: null, attemptId: null, claim: null });
       } else if (rec.state === "claiming") {
         if (rec.attemptId) await release(rec, rec.attemptId);
-        if (tabAlive) await closeTab(rec.tabId);
+        if (await showsJob(rec.tabId, rec.job.jobKey)) await closeTab(rec.tabId);
         await saveJob(rec, { state: marked ? "cancelled" : "queued", tabId: null, attemptId: null, claim: null });
       } else if (rec.state === "submitting" || rec.state === "observing") {
         const by = rec.state === "observing" && rec.clickedBy === "you" ? "you" : "applypilot";
@@ -1401,17 +1429,42 @@ export function createRunner(deps, opts = {}) {
       if (ev.kind === "challenge") quiet(focusTab(tabId));
       return true;
     }
-    if (ev.kind === "confirmed") quiet(watchConfirmed(tabId, ev));
-    if (ev.kind === "peter_click") quiet(watchClicked(tabId));
+    // One at a time, so a confirmation that follows your click never races the click's own record.
+    if (ev.kind === "confirmed") watchSerial(() => watchConfirmed(tabId, ev));
+    if (ev.kind === "peter_click") watchSerial(() => watchClicked(tabId));
     return true;
   }
+  let watchQueue = Promise.resolve();
+  const watchSerial = (fn) => (watchQueue = watchQueue.then(fn).catch(() => {}));
 
-  // You pressed Submit in a watched tab, so a confirmation that follows is yours, not ApplyPilot's.
+  // You pressed Submit in a watched tab, so a confirmation that follows is yours, not ApplyPilot's. In a needs-you
+  // tab that click may have sent the application even when no confirmation ApplyPilot knows follows, so the job is
+  // locked in Chrome and goes to "check" on the dashboard at once, not when the tab closes (the runner may be shut
+  // by then).
   async function watchClicked(tabId) {
     const w = watches.get(tabId);
-    if (!w || w.clickedBy === "you") return;
+    if (!w || w.peterClicked) return;
     w.clickedBy = "you";
-    await quiet(storage.set({ [KEYS.watch(tabId)]: w }));
+    w.peterClicked = true;
+    const key = KEYS.job(w.approvalId);
+    const rec = (await storage.get(key))[key];
+    const o = { clicked: false, clickedBy: "you", attemptId: w.attemptId ?? null, pageUrl: (await tabInfo(tabId))?.url || "" };
+    const writes = { [KEYS.watch(tabId)]: w };
+    let result = null;
+    if (w.kind === "needs_you" && isObject(rec) && rec.job && rec.state !== "done:submitted") {
+      Object.assign(writes, await ledgerFor(rec, "check", o));
+      const reasons = [R("you_clicked", "You clicked Submit in the open tab. ApplyPilot couldn't confirm it went through.")];
+      result = makeResult(rec, "check", { ...o, reasons });
+      const next = { ...rec, state: "done:check", reasons: result.reasons, finishedAt: result.finishedAt, lastResultId: result.resultId, updatedAt: iso() };
+      writes[KEYS.out(result.resultId)] = result;
+      writes[key] = next;
+      track(next);
+    }
+    await quiet(storage.set(writes));
+    if (result) {
+      emit();
+      await notifyResults();
+    }
   }
 
   // Peter finished a needs-you, check or skipped tab himself: record the real outcome.

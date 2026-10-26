@@ -50,6 +50,13 @@ export function checkText(row: Pick<SubmissionRow, "clickedBy">) {
     : "ApplyPilot clicked Submit but couldn't confirm it. Look for a confirmation email.";
 }
 
+// "Show tab" found the tab gone. Only a needs-you row has Open application; a check row has the two answers.
+export function tabGoneText(state: SubmissionRow["state"]) {
+  return state === "needs_you"
+    ? "That tab isn't open any more. Use Open application instead."
+    : "That tab isn't open any more. Look for a confirmation email, then say whether it went through.";
+}
+
 export function staleText(row: Pick<SubmissionRow, "claimMode">) {
   return `No result from Chrome for over ${Math.round(staleAfterMs(row.claimMode) / 60_000)} minutes. Look for a confirmation email.`;
 }

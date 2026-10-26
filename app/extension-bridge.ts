@@ -25,7 +25,7 @@ export type ExtensionBridge = {
   status: BridgeStatus; version: string; held: string[]; running: boolean; resultsWaiting: number;
   sendBatch(batch: Batch): Promise<BatchReply>;
   cancel(approvalIds: string[]): Promise<{ cancelled: string[]; tooLate: string[] }>;
-  stop(): Promise<void>; resume(): Promise<void>; focus(approvalId: string): Promise<void>;
+  stop(): Promise<void>; resume(): Promise<void>; focus(approvalId: string): Promise<boolean>;
 };
 
 type Ready = { status: BridgeStatus; version: string; held: string[]; running: boolean; resultsWaiting: number };
@@ -255,7 +255,7 @@ export function useExtensionBridge(opts: {
   const focus = useCallback(async (approvalId: string) => {
     connected();
     const reply = await request<unknown>("AP_FOCUS", { approvalId });
-    if (!isObject(reply) || reply.ok !== true) throw new Error("That tab isn't open any more. Use Open application instead.");
+    return isObject(reply) && reply.ok === true;
   }, [connected, request]);
 
   return useMemo(
