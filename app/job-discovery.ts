@@ -157,6 +157,24 @@ function has(haystack: string, phrase: string) {
   return new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`, "i").test(haystack);
 }
 
+// Remote postings often name the country they hire in ("Remote - UK", "Remote, EMEA"). A remote job only counts when it
+// names the U.S. or no country at all; one that names only other countries or regions is left out.
+const US_PLACE = /\b(united states|usa|u\.s\.a?\.?|us|north america|americas)\b/i;
+const NON_US_PLACE = new RegExp(`\\b(${[
+  "canada", "mexico", "brazil", "argentina", "colombia", "chile", "peru", "costa rica", "latam", "latin america", "south america",
+  "united kingdom", "uk", "england", "scotland", "wales", "ireland", "europe", "emea", "eu", "germany", "france", "spain", "portugal",
+  "italy", "netherlands", "belgium", "switzerland", "austria", "poland", "romania", "ukraine", "sweden", "norway", "denmark", "finland",
+  "czech republic", "czechia", "hungary", "greece", "turkey", "israel", "uae", "dubai", "saudi arabia", "egypt", "nigeria", "kenya",
+  "south africa", "africa", "middle east", "india", "pakistan", "bangladesh", "philippines", "singapore", "malaysia", "indonesia",
+  "vietnam", "thailand", "japan", "korea", "china", "hong kong", "taiwan", "apac", "asia", "australia", "new zealand", "anz",
+  "london", "toronto", "vancouver", "montreal", "berlin", "paris", "amsterdam", "dublin", "madrid", "barcelona", "lisbon", "warsaw",
+  "bangalore", "bengaluru", "hyderabad", "pune", "mumbai", "delhi", "manila", "sydney", "melbourne", "tokyo", "tel aviv",
+].join("|")})\\b`, "i");
+
+export function isNonUsOnly(location: string) {
+  return NON_US_PLACE.test(location) && !US_PLACE.test(location);
+}
+
 // Returns a 0-100 score for a job that matches the search, or null if it doesn't.
 export function scoreJob(job: Pick<BoardJob, "title" | "location" | "postedAt">, search: JobSearch, now = Date.now()) {
   const title = job.title.toLowerCase();
@@ -166,8 +184,8 @@ export function scoreJob(job: Pick<BoardJob, "title" | "location" | "postedAt">,
   const titleHit = titleWords.length === 0 || titleWords.some((word) => has(title, word));
   if (!titleHit) return null;
   const places = phrases(search.locations);
-  const remote = /remote|anywhere/i.test(location);
-  const placeHit = places.some((place) => has(location, place));
+  const remote = /remote|anywhere/i.test(location) && !isNonUsOnly(location);
+  const placeHit = places.some((place) => has(location, place) && !(/^(remote|anywhere)$/.test(place) && !remote));
   const remoteHit = search.remoteOk === "yes" && remote;
   if (places.length && location && !placeHit && !remoteHit) return null;
   let score = titleWords.length ? 55 : 30;

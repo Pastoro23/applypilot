@@ -268,7 +268,7 @@ export function FindJobsView<T extends TailorTarget>({
             <Field label="Job titles"><input className={inputClass} placeholder="Help desk, IT support, desktop support" value={search.titleWords} onChange={(e) => setSearch({ ...search, titleWords: e.target.value })} /></Field>
             <Field label="Places"><input className={inputClass} placeholder="Atlanta, GA, Lawrenceville" value={search.locations} onChange={(e) => setSearch({ ...search, locations: e.target.value })} /></Field>
             <Field label="Leave out titles with"><input className={inputClass} placeholder="Senior, Manager, Director" value={search.excludeWords} onChange={(e) => setSearch({ ...search, excludeWords: e.target.value })} /></Field>
-            <Field label="Include remote jobs">
+            <Field label="Include remote jobs (U.S.)">
               <select className={inputClass} value={search.remoteOk} onChange={(e) => setSearch({ ...search, remoteOk: e.target.value })}><option value="yes">Yes</option><option value="no">No</option></select>
             </Field>
             <div><button disabled={busy !== ""} className={primaryButton}>{busy === "search" ? "Saving…" : "Save search"}</button></div>

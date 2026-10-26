@@ -72,6 +72,12 @@ test('matches whole words in the title and the chosen places', () => {
   const job = (title: string, location: string, age = 1) => scoreJob({ title, location, postedAt: day(age) }, search, NOW);
   assert.ok((job('Help Desk Technician', 'Atlanta, GA') ?? 0) > (job('Help Desk Technician', 'Remote') ?? 0));
   assert.ok(job('Help Desk Technician', 'Remote - US'));
+  assert.ok(job('Help Desk Technician', 'Remote (USA or Canada)'));
+  assert.equal(job('Help Desk Technician', 'Remote - UK'), null);
+  assert.equal(job('Help Desk Technician', 'Remote, EMEA'), null);
+  assert.equal(job('Help Desk Technician', 'Toronto, Canada · Remote'), null);
+  assert.equal(scoreJob({ title: 'Help Desk Technician', location: 'Remote - India', postedAt: day(1) }, { ...search, locations: 'Remote' }, NOW), null);
+  assert.ok(scoreJob({ title: 'Help Desk Technician', location: 'Remote', postedAt: day(1) }, { ...search, locations: 'Remote' }, NOW));
   assert.equal(job('Senior Help Desk Analyst', 'Atlanta, GA'), null);
   assert.equal(job('Help Desk Technician', 'Denver, CO'), null);
   assert.equal(job('Software Engineer', 'Atlanta, GA'), null);
