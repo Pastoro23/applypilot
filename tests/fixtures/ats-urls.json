@@ -1,0 +1,216 @@
+{
+  "allowedHosts": [
+    "job-boards.greenhouse.io",
+    "boards.greenhouse.io",
+    "jobs.lever.co",
+    "jobs.eu.lever.co",
+    "jobs.ashbyhq.com"
+  ],
+  "parseAtsUrl": [
+    {
+      "url": "https://job-boards.greenhouse.io/acme/jobs/4012345",
+      "expected": {
+        "ats": "greenhouse",
+        "board": "acme",
+        "jobId": "4012345",
+        "jobKey": "greenhouse:acme:4012345"
+      }
+    },
+    {
+      "url": "https://job-boards.greenhouse.io/Acme/jobs/4012345?gh_src=abc",
+      "expected": {
+        "ats": "greenhouse",
+        "board": "Acme",
+        "jobId": "4012345",
+        "jobKey": "greenhouse:acme:4012345"
+      }
+    },
+    {
+      "url": "https://boards.greenhouse.io/acme/jobs/4012345",
+      "expected": {
+        "ats": "greenhouse",
+        "board": "acme",
+        "jobId": "4012345",
+        "jobKey": "greenhouse:acme:4012345"
+      }
+    },
+    {
+      "url": "https://job-boards.greenhouse.io/acme/jobs/4012345/confirmation",
+      "expected": {
+        "ats": "greenhouse",
+        "board": "acme",
+        "jobId": "4012345",
+        "jobKey": "greenhouse:acme:4012345"
+      }
+    },
+    {
+      "url": "https://job-boards.greenhouse.io/embed/job_app?for=acme&token=4012345",
+      "expected": {
+        "ats": "greenhouse",
+        "board": "acme",
+        "jobId": "4012345",
+        "jobKey": "greenhouse:acme:4012345"
+      }
+    },
+    {
+      "url": "https://boards.greenhouse.io/embed/job_app?token=4012345&for=Acme",
+      "expected": {
+        "ats": "greenhouse",
+        "board": "Acme",
+        "jobId": "4012345",
+        "jobKey": "greenhouse:acme:4012345"
+      }
+    },
+    {
+      "url": "https://job-boards.greenhouse.io/embed/job_board?for=acme",
+      "expected": null
+    },
+    {
+      "url": "https://job-boards.greenhouse.io/embed/job_app?for=acme",
+      "expected": null
+    },
+    {
+      "url": "https://job-boards.greenhouse.io/acme",
+      "expected": null
+    },
+    {
+      "url": "https://job-boards.greenhouse.io/acme/jobs/",
+      "expected": null
+    },
+    {
+      "url": "https://job-boards.eu.greenhouse.io/acme/jobs/4012345",
+      "expected": null
+    },
+    {
+      "url": "https://greenhouse.io.evil.com/acme/jobs/4012345",
+      "expected": null
+    },
+    {
+      "url": "https://evil.com/job-boards.greenhouse.io/acme/jobs/4012345",
+      "expected": null
+    },
+    {
+      "url": "http://job-boards.greenhouse.io/acme/jobs/4012345",
+      "expected": null
+    },
+    {
+      "url": "https://user:pw@job-boards.greenhouse.io/acme/jobs/4012345",
+      "expected": null
+    },
+    {
+      "url": "https://job-boards.greenhouse.io:8443/acme/jobs/4012345",
+      "expected": null
+    },
+    {
+      "url": "https://job-boards.greenhouse.io/..%2F/jobs/4012345",
+      "expected": null
+    },
+    {
+      "url": "https://job-boards.greenhouse.io/acme/jobs/40123%2045",
+      "expected": null
+    },
+    {
+      "url": "https://acme.com/careers?gh_jid=4012345",
+      "expected": null
+    },
+    {
+      "url": "https://jobs.lever.co/acme/5a1b2c3d-1111-2222-3333-444455556666",
+      "expected": {
+        "ats": "lever",
+        "board": "acme",
+        "jobId": "5a1b2c3d-1111-2222-3333-444455556666",
+        "jobKey": "lever:acme:5a1b2c3d-1111-2222-3333-444455556666"
+      }
+    },
+    {
+      "url": "https://jobs.lever.co/acme/5a1b2c3d-1111-2222-3333-444455556666/apply",
+      "expected": {
+        "ats": "lever",
+        "board": "acme",
+        "jobId": "5a1b2c3d-1111-2222-3333-444455556666",
+        "jobKey": "lever:acme:5a1b2c3d-1111-2222-3333-444455556666"
+      }
+    },
+    {
+      "url": "https://jobs.lever.co/acme/5a1b2c3d-1111-2222-3333-444455556666/thanks",
+      "expected": {
+        "ats": "lever",
+        "board": "acme",
+        "jobId": "5a1b2c3d-1111-2222-3333-444455556666",
+        "jobKey": "lever:acme:5a1b2c3d-1111-2222-3333-444455556666"
+      }
+    },
+    {
+      "url": "https://jobs.eu.lever.co/acme/5a1b2c3d-1111-2222-3333-444455556666/apply",
+      "expected": {
+        "ats": "lever",
+        "board": "acme",
+        "jobId": "5a1b2c3d-1111-2222-3333-444455556666",
+        "jobKey": "lever:acme:5a1b2c3d-1111-2222-3333-444455556666"
+      }
+    },
+    {
+      "url": "https://jobs.lever.co/acme",
+      "expected": null
+    },
+    {
+      "url": "https://jobs.lever.co.evil.com/acme/5a1b2c3d-1111-2222-3333-444455556666",
+      "expected": null
+    },
+    {
+      "url": "https://jobs.ashbyhq.com/acme/0f8e7d6c-aaaa-bbbb-cccc-ddddeeeeffff",
+      "expected": {
+        "ats": "ashby",
+        "board": "acme",
+        "jobId": "0f8e7d6c-aaaa-bbbb-cccc-ddddeeeeffff",
+        "jobKey": "ashby:acme:0f8e7d6c-aaaa-bbbb-cccc-ddddeeeeffff"
+      }
+    },
+    {
+      "url": "https://jobs.ashbyhq.com/Acme/0f8e7d6c-aaaa-bbbb-cccc-ddddeeeeffff/application",
+      "expected": {
+        "ats": "ashby",
+        "board": "Acme",
+        "jobId": "0f8e7d6c-aaaa-bbbb-cccc-ddddeeeeffff",
+        "jobKey": "ashby:acme:0f8e7d6c-aaaa-bbbb-cccc-ddddeeeeffff"
+      }
+    },
+    {
+      "url": "https://jobs.ashbyhq.com/acme",
+      "expected": null
+    },
+    {
+      "url": "https://ashbyhq.com/acme/0f8e7d6c-aaaa-bbbb-cccc-ddddeeeeffff",
+      "expected": null
+    },
+    {
+      "url": "https://constructor/acme/jobs/1",
+      "expected": null
+    },
+    {
+      "url": "https://job-boards.greenhouse.io./acme/jobs/4012345",
+      "expected": null
+    },
+    {
+      "url": "https://JOB-BOARDS.Greenhouse.IO/acme/jobs/4012345",
+      "expected": {
+        "ats": "greenhouse",
+        "board": "acme",
+        "jobId": "4012345",
+        "jobKey": "greenhouse:acme:4012345"
+      }
+    },
+    {
+      "url": "https://jobs.lever.co/acme/5a1b2c3d-1111-2222-3333-444455556666%2Fx",
+      "expected": null
+    },
+    {
+      "url": "not a url",
+      "expected": null
+    },
+    {
+      "url": "",
+      "expected": null
+    }
+  ]
+}

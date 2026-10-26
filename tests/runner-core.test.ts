@@ -1,0 +1,742 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createHash, randomUUID } from 'node:crypto';
+import {
+  KEYS, acceptBatch, ackResults, cancelJobs, cleanup, createRunner, heldSummary, pullResults, validateJob,
+} from '../extension/runner-core.js';
+
+// Fakes are loosely typed on purpose: they stand in for chrome.* objects.
+type Json = ReturnType<typeof JSON.parse>;
+
+const T0 = Date.parse('2026-10-26T12:00:00Z');
+const HOUR = 3_600_000;
+const iso = (ms: number) => new Date(ms).toISOString();
+const PDF = Buffer.from('%PDF-1.7\n1 0 obj << /Title (Test Person Resume) >> endobj\n%%EOF\n');
+const PDF_SHA = createHash('sha256').update(PDF).digest('hex');
+const sha256 = async (b: Uint8Array) => createHash('sha256').update(b).digest('hex');
+const clone = (v: unknown): Json => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)));
+const tick = (ms = 2) => new Promise((r) => setTimeout(r, ms));
+
+function makeJob(over: Json = {}): Json {
+  const leverId = randomUUID();
+  return {
+    approvalId: randomUUID(), applicationId: `app-${leverId.slice(0, 8)}`, jobKey: `lever:acme:${leverId}`, ats: 'lever',
+    applyUrls: [`https://jobs.lever.co/acme/${leverId}/apply`], company: 'Acme Health', role: 'Help Desk Technician', revision: 2,
+    approvedAt: iso(T0 - 60_000), expiresAt: iso(T0 + 23 * HOUR), supersedesId: null,
+    profile: { firstName: 'Test', lastName: 'Person', email: 't@example.com', phone: '404-555-0100' }, profileHash: 'a'.repeat(64),
+    resume: { name: 'Test_Person_Resume.pdf', type: 'application/pdf', size: PDF.length, sha256: PDF_SHA, b64: PDF.toString('base64') },
+    coverLetter: 'Dear team,', ...over,
+  };
+}
+
+function fakeEvent() {
+  const fns = new Set<(...a: Json[]) => void>();
+  return { addListener: (f: (...a: Json[]) => void) => fns.add(f), removeListener: (f: (...a: Json[]) => void) => fns.delete(f), emit: (...a: Json[]) => [...fns].forEach((f) => f(...a)) };
+}
+
+function fakeStorage(seed: Json = {}) {
+  const data = new Map<string, Json>(Object.entries(clone(seed)));
+  const s = {
+    data,
+    beforeSet: null as null | ((items: Json) => Promise<void> | void),
+    async get(keys: Json) {
+      if (keys == null) return clone(Object.fromEntries(data));
+      const out: Json = {};
+      for (const k of [].concat(keys)) if (data.has(k)) out[k] = clone(data.get(k));
+      return out;
+    },
+    async set(items: Json) {
+      if (s.beforeSet) await s.beforeSet(items);
+      for (const [k, v] of Object.entries(clone(items))) data.set(k, v);
+    },
+    async remove(keys: Json) {
+      for (const k of [].concat(keys)) data.delete(k);
+    },
+  };
+  return s;
+}
+
+function fakeTabs() {
+  let next = 100;
+  const open = new Map<number, Json>();
+  const onUpdated = fakeEvent();
+  const onRemoved = fakeEvent();
+  const created: string[] = [];
+  const removed: number[] = [];
+  const t = {
+    open, created, removed, onUpdated, onRemoved,
+    landOn: (url: string) => url,
+    async create(p: Json) {
+      const id = next++;
+      created.push(p.url);
+      open.set(id, { id, url: t.landOn(p.url), status: 'complete', windowId: 1 });
+      return { id, status: 'loading', windowId: 1 };
+    },
+    async get(id: number) {
+      if (!open.has(id)) throw new Error('No tab with id');
+      return { ...open.get(id) };
+    },
+    async update(id: number) {
+      if (!open.has(id)) throw new Error('No tab with id');
+      return { ...open.get(id) };
+    },
+    async remove(id: number) {
+      removed.push(id);
+      if (open.delete(id)) onRemoved.emit(id);
+    },
+  };
+  return t;
+}
+
+function fakePage(tabs: ReturnType<typeof fakeTabs>) {
+  const calls: string[] = [];
+  const thanks = (tabId: number) => String(tabs.open.get(tabId)?.url ?? '').replace(/\/apply$/, '/thanks');
+  const handlers: Record<string, (arg: Json, tabId: number) => Json> = {
+    findForm: () => ({ ok: true, reason: '', text: '', rootPath: 'form#application-form', inIframe: false, multiStep: false }),
+    fill: () => ({ filled: [{ label: 'Email', type: 'email', required: true, value: 't@example.com', source: 'profile' }], blockers: [], resumeInputPath: '#resume' }),
+    audit: () => ({
+      fingerprint: 'fp-1', blockers: [], relaxations: [], submit: { path: '#btn-submit', label: 'Submit application' },
+      report: [{ label: 'Email', type: 'email', required: true, value: 't@example.com', source: 'profile' }],
+    }),
+    pressSubmit: () => ({ clicked: true }),
+    armSupervised: () => ({ armed: true, reason: '', submit: { path: '#btn-submit', label: 'Submit application' } }),
+    readOutcome: (_a, tabId) => ({ outcome: 'submitted', code: 'confirmed', reason: '', confirmationText: 'Thank you for applying.', url: thanks(tabId), confirmationKind: 'url' }),
+    watchForConfirmation: () => ({ watching: true }),
+    bannerNeedsYou: (reasons) => ({ shown: true, count: reasons.length }),
+  };
+  return {
+    calls, handlers,
+    async executeScript({ target, files, args }: Json) {
+      if (files) {
+        if (!tabs.open.has(target.tabId)) throw new Error('No tab with id');
+        calls.push('inject');
+        return [{ result: null }];
+      }
+      const [method, params] = args;
+      calls.push(method);
+      const h = handlers[method];
+      return [{ result: h ? await h(params[0], target.tabId) : { __apMissing: true } }];
+    },
+  };
+}
+
+type Setup = {
+  jobs?: Json[]; claims?: Json[]; settings?: Json; seed?: Json; hang?: (ms: number) => boolean; autoAck?: boolean; permitted?: boolean;
+};
+
+async function setup(o: Setup = {}) {
+  const storage = fakeStorage(o.seed ?? {});
+  const tabs = fakeTabs();
+  const scripting = fakePage(tabs);
+  let clock = T0;
+  const slept: number[] = [];
+  const hang = o.hang ?? (() => false);
+  const claims = [...(o.claims ?? [{ ok: true, mode: 'auto' }])];
+  const delivered: Json[] = [];
+  const bridge = {
+    sent: [] as Json[],
+    notes: [] as Json[],
+    async claim(p: Json) {
+      bridge.sent.push(clone(p));
+      const next = claims.length > 1 ? claims.shift() : claims[0];
+      return typeof next === 'function' ? next(p) : clone(next);
+    },
+    async notify(type: string, payload: Json) {
+      bridge.notes.push([type, payload]);
+      // Stands in for the dashboard: pull, "POST", then ack.
+      if (type === 'AP_RESULTS_WAITING' && o.autoAck) {
+        const results = await pullResults(storage);
+        delivered.push(...results);
+        await ackResults(storage, results.map((r: Json) => r.resultId), clock);
+      }
+    },
+  };
+  const deps = {
+    storage, tabs, scripting, bridge, sha256, uuid: randomUUID,
+    windows: { update: async () => ({}) },
+    permissions: { contains: async () => o.permitted ?? true },
+    now: () => clock,
+    sleep: (ms: number) => {
+      slept.push(ms);
+      return hang(ms) ? new Promise<void>(() => {}) : new Promise<void>((r) => setTimeout(r, 1));
+    },
+  };
+  const settings = o.settings ?? { auto: { lever: true } };
+  const jobs = o.jobs ?? [makeJob()];
+  if (jobs.length) {
+    const res = await acceptBatch(storage, { batchId: 'b1', createdAt: iso(T0), settings, jobs }, { now: T0, sha256 });
+    assert.deepEqual(res.rejected, []);
+  }
+  const make = () => createRunner(deps, { countdownMs: 0, windowId: 1, version: '3.0.0' });
+  const runner = make();
+  return {
+    storage, tabs, scripting, bridge, runner, make, slept, delivered, jobs,
+    advance: (ms: number) => (clock += ms),
+    results: () => pullResults(storage),
+    job: (id: string) => storage.data.get(KEYS.job(id)),
+    patchJob: (id: string, patch: Json) => storage.data.set(KEYS.job(id), { ...storage.data.get(KEYS.job(id)), ...patch }),
+  };
+}
+
+const pageCalls = (s: { scripting: { calls: string[] } }, name: string) => s.scripting.calls.filter((c) => c === name).length;
+
+async function until(check: () => boolean | Promise<boolean>, what: string) {
+  for (let i = 0; i < 500; i++) {
+    if (await check()) return;
+    await tick();
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+
+// ---- auto mode -----------------------------------------------------------------------------------
+
+test('the ledger write is awaited before pressSubmit, then the job is reported submitted', async () => {
+  const s = await setup();
+  const [job] = s.jobs;
+  const order: string[] = [];
+  s.storage.beforeSet = async (items) => {
+    if (Object.keys(items).some((k) => k.startsWith('apLedger:'))) {
+      order.push('ledger:start');
+      await tick(20);
+      order.push('ledger:done');
+    }
+  };
+  s.scripting.handlers.pressSubmit = () => (order.push('pressSubmit'), { clicked: true });
+  await s.runner.recover();
+  await s.runner.run({ countdown: false });
+
+  assert.deepEqual(order, ['ledger:start', 'ledger:done', 'pressSubmit']);
+  const [claim] = s.bridge.sent;
+  assert.equal(claim.approvalId, job.approvalId);
+  assert.equal(claim.resumeSha256, PDF_SHA);
+  assert.equal(claim.resumeFilename, 'Test_Person_Resume.pdf');
+  assert.equal(claim.pageUrl, job.applyUrls[0]);
+  assert.equal(claim.fingerprint, 'fp-1');
+  assert.deepEqual(claim.relaxations, []);
+  assert.equal(claim.extensionVersion, '3.0.0');
+  const ledger = s.storage.data.get(KEYS.ledger(job.jobKey));
+  assert.equal(ledger.approvalId, job.approvalId);
+  assert.equal(ledger.attemptId, claim.attemptId);
+  assert.equal(ledger.mode, 'auto');
+  const [r] = await s.results();
+  assert.equal(r.outcome, 'submitted');
+  assert.equal(r.clicked, true);
+  assert.equal(r.clickedBy, 'applypilot');
+  assert.equal(r.attemptId, claim.attemptId);
+  assert.match(r.pageUrl, /\/thanks$/);
+  assert.equal(pageCalls(s, 'pressSubmit'), 1);
+  const rec = s.job(job.approvalId);
+  assert.equal(rec.state, 'done:submitted');
+  assert.equal(rec.job.resume.b64, undefined, 'the PDF is deleted once the job is finished');
+  assert.ok(s.bridge.notes.some(([type]: Json) => type === 'AP_RESULTS_WAITING'));
+});
+
+test('a denied claim never reaches pressSubmit', async () => {
+  const s = await setup({ claims: [{ ok: false, reason: 'resume_changed' }] });
+  const [job] = s.jobs;
+  await s.runner.recover();
+  await s.runner.run({ countdown: false });
+  assert.equal(pageCalls(s, 'pressSubmit'), 0);
+  assert.equal(pageCalls(s, 'armSupervised'), 0);
+  assert.equal(s.storage.data.has(KEYS.ledger(job.jobKey)), false);
+  const [r] = await s.results();
+  assert.equal(r.outcome, 'needs_you');
+  assert.equal(r.clicked, false);
+  assert.equal(r.attemptId, null, 'a denied claim holds nothing on the server');
+  assert.deepEqual(r.reasons.map((x: Json) => x.code), ['resume_changed']);
+  assert.equal(pageCalls(s, 'bannerNeedsYou'), 1);
+  assert.equal(s.storage.data.has(KEYS.watch(s.job(job.approvalId).tabId)), true, 'the tab stays open and watched');
+});
+
+test('a revoked approval is cancelled, nothing clicked, and its tab closed', async () => {
+  const s = await setup({ claims: [{ ok: false, reason: 'revoked' }] });
+  await s.runner.recover();
+  await s.runner.run({ countdown: false });
+  const [r] = await s.results();
+  assert.equal(r.outcome, 'cancelled');
+  assert.equal(pageCalls(s, 'pressSubmit'), 0);
+  assert.equal(s.tabs.open.size, 0);
+});
+
+test('Stop pressed between the claim and the ledger write gives the claim back without a click', async () => {
+  const s = await setup({
+    claims: [() => {
+      s.storage.data.set(KEYS.halt, true);
+      return { ok: true, mode: 'auto' };
+    }],
+  });
+  const [job] = s.jobs;
+  await s.runner.recover();
+  await s.runner.run({ countdown: false });
+  assert.equal(pageCalls(s, 'pressSubmit'), 0);
+  assert.equal(s.storage.data.has(KEYS.ledger(job.jobKey)), false);
+  const [r] = await s.results();
+  assert.equal(r.outcome, 'not_clicked');
+  assert.equal(r.clicked, false);
+  assert.equal(r.clickedBy, '');
+  assert.equal(r.attemptId, s.bridge.sent[0].attemptId);
+  assert.equal(s.storage.data.get(KEYS.run).state, 'paused');
+  assert.equal(s.storage.data.get(KEYS.run).pausedReason, 'halted');
+  assert.equal(s.job(job.approvalId).state, 'paused');
+});
+
+test('pressSubmit refusing ({clicked:false}) removes the ledger entry and reports needs_you', async () => {
+  const s = await setup();
+  const [job] = s.jobs;
+  s.scripting.handlers.pressSubmit = () => ({ clicked: false, reason: 'fingerprint_changed', text: 'The form changed after ApplyPilot checked it.' });
+  await s.runner.recover();
+  await s.runner.run({ countdown: false });
+  assert.equal(s.storage.data.has(KEYS.ledger(job.jobKey)), false);
+  const [r] = await s.results();
+  assert.equal(r.outcome, 'needs_you');
+  assert.equal(r.clicked, false);
+  assert.equal(r.attemptId, s.bridge.sent[0].attemptId, 'the server moves the claimed row to needs_you');
+  assert.deepEqual(r.reasons.map((x: Json) => x.code), ['fingerprint_changed']);
+});
+
+test('a rejected executeScript around the click counts as clicked: check, ledger kept, never retried', async () => {
+  const s = await setup();
+  const [job] = s.jobs;
+  s.scripting.handlers.pressSubmit = () => {
+    throw new Error('Frame with ID 0 was removed.');
+  };
+  s.scripting.handlers.readOutcome = () => ({ outcome: 'check', code: 'no_confirmation', reason: 'Submit pressed, no confirmation seen', url: '' });
+  await s.runner.recover();
+  await s.runner.run({ countdown: false });
+  const [r] = await s.results();
+  assert.equal(r.outcome, 'check');
+  assert.equal(r.clicked, true);
+  assert.equal(r.clickedBy, 'applypilot');
+  assert.ok(s.storage.data.has(KEYS.ledger(job.jobKey)));
+  await s.runner.run({ countdown: false });
+  assert.equal(pageCalls(s, 'pressSubmit'), 1);
+});
+
+// ---- crash recovery ------------------------------------------------------------------------------
+
+test('a crash after the ledger write becomes check on recovery and is never clicked again', async () => {
+  const s = await setup();
+  const [job] = s.jobs;
+  const tab = await s.tabs.create({ url: job.applyUrls[0] });
+  const attemptId = randomUUID();
+  s.patchJob(job.approvalId, { state: 'submitting', tabId: tab.id, attemptId, claim: { mode: 'auto' } });
+  s.storage.data.set(KEYS.ledger(job.jobKey), { clickedAt: iso(T0), approvalId: job.approvalId, applicationId: job.applicationId, attemptId, mode: 'auto' });
+  const runner = s.make();
+  await runner.recover();
+  const [r] = await s.results();
+  assert.equal(r.outcome, 'check');
+  assert.equal(r.clicked, true);
+  assert.equal(r.attemptId, attemptId);
+  assert.match(r.reasons[0].text, /Chrome closed while submitting/);
+  await runner.run({ countdown: false });
+  assert.equal(pageCalls(s, 'pressSubmit'), 0);
+  assert.equal(s.bridge.sent.length, 0);
+  assert.ok(s.storage.data.has(KEYS.ledger(job.jobKey)));
+  // A fresh approval for the same job is refused while the ledger says it was clicked.
+  const again = await acceptBatch(s.storage, { jobs: [{ ...makeJob(), jobKey: job.jobKey, applyUrls: job.applyUrls }] }, { now: T0, sha256 });
+  assert.equal(again.accepted.length, 0);
+  assert.match(again.rejected[0].reason, /already pressed Submit/);
+});
+
+test('a crash while claiming reports not_clicked for that attempt, then the job runs again', async () => {
+  const s = await setup({ autoAck: true });
+  const [job] = s.jobs;
+  const attemptId = randomUUID();
+  s.patchJob(job.approvalId, { state: 'claiming', attemptId });
+  const runner = s.make();
+  await runner.recover();
+  assert.equal(s.delivered[0].outcome, 'not_clicked');
+  assert.equal(s.delivered[0].attemptId, attemptId);
+  assert.equal(s.job(job.approvalId).state, 'queued');
+  await runner.run({ countdown: false });
+  assert.notEqual(s.bridge.sent[0].attemptId, attemptId);
+  assert.equal(s.delivered.at(-1).outcome, 'submitted');
+});
+
+test('a new claim waits until the earlier release has reached the server', async () => {
+  const s = await setup();
+  const [job] = s.jobs;
+  s.patchJob(job.approvalId, { state: 'claiming', attemptId: randomUUID() });
+  const runner = s.make();
+  await runner.recover();
+  await runner.run({ countdown: false });
+  assert.equal(s.bridge.sent.length, 0, 'no claim while the not_clicked result is unacknowledged');
+  assert.equal(s.storage.data.get(KEYS.run).pausedReason, 'dashboard');
+  assert.equal(s.job(job.approvalId).state, 'paused');
+});
+
+test('a crash before the claim requeues the job and closes its half-filled tab', async () => {
+  const s = await setup();
+  const [job] = s.jobs;
+  const tab = await s.tabs.create({ url: job.applyUrls[0] });
+  s.patchJob(job.approvalId, { state: 'auditing', tabId: tab.id });
+  const runner = s.make();
+  await runner.recover();
+  assert.equal(s.job(job.approvalId).state, 'queued');
+  assert.equal(s.tabs.open.has(tab.id), false);
+  assert.deepEqual(await s.results(), []);
+});
+
+// ---- claim denials -------------------------------------------------------------------------------
+
+test('spacing denials are waited out and retried; the next auto claim waits a minute', async () => {
+  const s = await setup({
+    jobs: [makeJob(), makeJob({ approvedAt: iso(T0 - 30_000) })],
+    claims: [{ ok: false, reason: 'spacing', retryAfterSec: 7 }, { ok: true, mode: 'auto' }],
+  });
+  await s.runner.recover();
+  await s.runner.run({ countdown: false });
+  assert.ok(s.slept.includes(7000));
+  assert.ok(s.slept.includes(60_000), 'the second auto claim waits for 60 s after the first');
+  assert.equal(s.bridge.sent.length, 3);
+  assert.notEqual(s.bridge.sent[0].attemptId, s.bridge.sent[1].attemptId);
+  const results = await s.results();
+  assert.deepEqual(results.map((r: Json) => r.outcome), ['submitted', 'submitted']);
+  assert.equal(results[0].attemptId, s.bridge.sent[1].attemptId);
+});
+
+test('the daily cap pauses the queue until it resets, with nothing clicked', async () => {
+  const resetAt = iso(T0 + 3 * HOUR);
+  const s = await setup({ claims: [{ ok: false, reason: 'daily_cap', resetAt }] });
+  const [job] = s.jobs;
+  await s.runner.recover();
+  await s.runner.run({ countdown: false });
+  const run = s.storage.data.get(KEYS.run);
+  assert.equal(run.state, 'paused');
+  assert.equal(run.pausedReason, 'daily_cap');
+  assert.equal(run.resumeAt, Date.parse(resetAt));
+  assert.equal(s.job(job.approvalId).state, 'paused');
+  assert.equal(pageCalls(s, 'pressSubmit'), 0);
+  assert.equal(s.tabs.open.size, 0, 'the filled tab is closed; it is filled again after the reset');
+  assert.deepEqual(await s.results(), []);
+});
+
+test('a daily-cap pause survives a runner restart until it resets', async () => {
+  const s = await setup({ seed: { [KEYS.run]: { state: 'paused', pausedReason: 'daily_cap', resumeAt: T0 + HOUR } } });
+  await s.runner.recover();
+  await s.runner.start();
+  assert.equal(s.storage.data.get(KEYS.run).state, 'paused');
+  assert.equal(s.tabs.created.length, 0);
+  s.advance(2 * HOUR);
+  const later = s.make();
+  await later.recover();
+  await later.start();
+  assert.equal(s.bridge.sent.length, 1, 'after the reset the queue runs again');
+});
+
+test('no dashboard to claim through pauses the run without a click', async () => {
+  const s = await setup({ claims: [{ ok: false, reason: 'no_dashboard' }] });
+  await s.runner.recover();
+  await s.runner.run({ countdown: false });
+  assert.equal(s.storage.data.get(KEYS.run).pausedReason, 'dashboard');
+  assert.equal(pageCalls(s, 'pressSubmit'), 0);
+  assert.deepEqual(await s.results(), []);
+});
+
+// ---- supervised mode -----------------------------------------------------------------------------
+
+const supervisedHang = (ms: number) => ms >= 25 * 60_000;
+
+test('supervised: ApplyPilot highlights Submit, waits for your click, and records it as yours', async () => {
+  const s = await setup({ claims: [{ ok: true, mode: 'supervised' }], hang: supervisedHang });
+  const [job] = s.jobs;
+  s.scripting.handlers.armSupervised = (_fp, tabId) => {
+    setTimeout(() => s.runner.onPageEvent({ type: 'AP_PAGE_EVENT', kind: 'peter_click', url: job.applyUrls[0] },
+      { id: 'ext', tab: { id: tabId }, url: job.applyUrls[0] }), 5);
+    return { armed: true, reason: '' };
+  };
+  await s.runner.recover();
+  await s.runner.run({ countdown: false });
+  assert.equal(pageCalls(s, 'pressSubmit'), 0);
+  assert.equal(s.storage.data.has(KEYS.ledger(job.jobKey)), false);
+  const [r] = await s.results();
+  assert.equal(r.outcome, 'submitted');
+  assert.equal(r.clicked, false);
+  assert.equal(r.clickedBy, 'you');
+  assert.equal(r.attemptId, s.bridge.sent[0].attemptId);
+});
+
+test('supervised: Skip gives needs_you and keeps the tab open and watched', async () => {
+  const s = await setup({ claims: [{ ok: true, mode: 'supervised' }], hang: supervisedHang });
+  const [job] = s.jobs;
+  await s.runner.recover();
+  const running = s.runner.run({ countdown: false });
+  await until(() => Boolean(s.runner.view().waiting), 'the supervised wait');
+  assert.equal(s.job(job.approvalId).state, 'waiting_for_you');
+  s.runner.skip(job.approvalId);
+  await running;
+  const [r] = await s.results();
+  assert.equal(r.outcome, 'needs_you');
+  assert.equal(r.clicked, false);
+  assert.equal(r.attemptId, s.bridge.sent[0].attemptId);
+  assert.equal(r.reasons[0].text, "You didn't submit this one");
+  const tabId = s.job(job.approvalId).tabId;
+  assert.ok(s.tabs.open.has(tabId));
+  assert.equal(s.storage.data.get(KEYS.watch(tabId)).kind, 'needs_you');
+});
+
+test('supervised: no click within the wait gives needs_you', async () => {
+  const s = await setup({ claims: [{ ok: true, mode: 'supervised' }] });
+  await s.runner.recover();
+  await s.runner.run({ countdown: false });
+  const [r] = await s.results();
+  assert.equal(r.outcome, 'needs_you');
+  assert.equal(r.reasons[0].code, 'timeout');
+  assert.ok(s.slept.includes(30 * 60_000));
+  assert.equal(pageCalls(s, 'pressSubmit'), 0);
+});
+
+test('page events from tabs the runner does not own, from other hosts, or from another job are ignored', async () => {
+  const s = await setup({ claims: [{ ok: true, mode: 'supervised' }], hang: supervisedHang });
+  const [job] = s.jobs;
+  await s.runner.recover();
+  const running = s.runner.run({ countdown: false });
+  await until(() => Boolean(s.runner.view().waiting), 'the supervised wait');
+  const tabId = s.job(job.approvalId).tabId;
+  const otherJob = `https://jobs.lever.co/acme/${randomUUID()}/apply`;
+  assert.equal(s.runner.onPageEvent({ kind: 'peter_click' }, { tab: { id: 999 }, url: job.applyUrls[0] }), false);
+  assert.equal(s.runner.onPageEvent({ kind: 'peter_click' }, { tab: { id: tabId }, url: 'https://evil.example/apply' }), false);
+  assert.equal(s.runner.onPageEvent({ kind: 'peter_click' }, { tab: { id: tabId }, url: otherJob }), false);
+  assert.equal(s.runner.onPageEvent({ kind: 'confirmed' }, { tab: { id: tabId }, url: otherJob.replace(/\/apply$/, '/thanks') }), false);
+  assert.equal(s.runner.view().waiting?.approvalId, job.approvalId);
+  s.runner.skip(job.approvalId);
+  await running;
+  // The tab is now a watched needs-you tab: a confirmation for some other job there is still not this one.
+  assert.equal(s.runner.onPageEvent({ kind: 'confirmed' }, { tab: { id: tabId }, url: otherJob.replace(/\/apply$/, '/thanks') }), false);
+  await tick(20);
+  assert.equal((await s.results()).length, 1);
+});
+
+// ---- gates ---------------------------------------------------------------------------------------
+
+test('the ledger exception: only a re-approval that supersedes the clicked approval may run', async () => {
+  const leverId = randomUUID();
+  const jobKey = `lever:acme:${leverId}`;
+  const applyUrls = [`https://jobs.lever.co/acme/${leverId}/apply`];
+  const clickedApproval = randomUUID();
+  const seed = { [KEYS.ledger(jobKey)]: { clickedAt: iso(T0 - HOUR), approvalId: clickedApproval, attemptId: randomUUID(), mode: 'auto' } };
+  const s = await setup({ seed, jobs: [makeJob({ jobKey, applyUrls, supersedesId: clickedApproval })] });
+  for (const supersedesId of [null, randomUUID()]) {
+    const r = await acceptBatch(s.storage, { jobs: [makeJob({ jobKey, applyUrls, supersedesId })] }, { now: T0, sha256 });
+    assert.equal(r.accepted.length, 0);
+  }
+  await s.runner.recover();
+  await s.runner.run({ countdown: false });
+  const [r] = await s.results();
+  assert.equal(r.outcome, 'submitted');
+  assert.equal(s.storage.data.get(KEYS.ledger(jobKey)).approvalId, s.jobs[0].approvalId);
+});
+
+test('a ledger entry that appears after the batch was accepted still stops the job before it opens', async () => {
+  const s = await setup();
+  const [job] = s.jobs;
+  s.storage.data.set(KEYS.ledger(job.jobKey), { clickedAt: iso(T0), approvalId: randomUUID(), attemptId: randomUUID(), mode: 'auto' });
+  await s.runner.recover();
+  await s.runner.run({ countdown: false });
+  const [r] = await s.results();
+  assert.equal(r.outcome, 'needs_you');
+  assert.equal(r.reasons[0].code, 'already_clicked');
+  assert.equal(s.tabs.created.length, 0);
+  assert.equal(s.bridge.sent.length, 0);
+});
+
+test('a refused click after a superseding approval puts the earlier ledger entry back', async () => {
+  const leverId = randomUUID();
+  const jobKey = `lever:acme:${leverId}`;
+  const earlier = { clickedAt: iso(T0 - HOUR), approvalId: randomUUID(), attemptId: randomUUID(), mode: 'auto' };
+  const s = await setup({
+    seed: { [KEYS.ledger(jobKey)]: earlier },
+    jobs: [makeJob({ jobKey, applyUrls: [`https://jobs.lever.co/acme/${leverId}/apply`], supersedesId: earlier.approvalId })],
+  });
+  s.scripting.handlers.pressSubmit = () => ({ clicked: false, reason: 'submit_changed' });
+  await s.runner.recover();
+  await s.runner.run({ countdown: false });
+  assert.deepEqual(s.storage.data.get(KEYS.ledger(jobKey)), earlier);
+});
+
+test('an open watched tab for the same job blocks the run and the batch', async () => {
+  const s = await setup();
+  const [job] = s.jobs;
+  const tab = await s.tabs.create({ url: job.applyUrls[0] });
+  s.storage.data.set(KEYS.watch(tab.id), { approvalId: randomUUID(), jobKey: job.jobKey, ats: 'lever', kind: 'needs_you', since: iso(T0) });
+  const before = s.tabs.created.length;
+  const runner = s.make();
+  await runner.recover();
+  await runner.run({ countdown: false });
+  assert.equal(s.tabs.created.length, before, 'no new tab for a job that is already open');
+  assert.equal(s.bridge.sent.length, 0);
+  const [r] = await s.results();
+  assert.equal(r.outcome, 'needs_you');
+  assert.equal(r.reasons[0].code, 'open_tab');
+  const again = await acceptBatch(s.storage, { jobs: [{ ...makeJob(), jobKey: job.jobKey, applyUrls: job.applyUrls }] }, { now: T0, sha256 });
+  assert.match(again.rejected[0].reason, /open in a tab/);
+});
+
+test('an expired approval is reported cancelled without opening anything', async () => {
+  const s = await setup({ jobs: [makeJob({ expiresAt: iso(T0 + HOUR) })] });
+  s.advance(2 * HOUR);
+  await s.runner.recover();
+  await s.runner.run({ countdown: false });
+  const [r] = await s.results();
+  assert.equal(r.outcome, 'cancelled');
+  assert.equal(r.reasons[0].text, 'Approval expired');
+  assert.equal(s.tabs.created.length, 0);
+  assert.equal(s.bridge.sent.length, 0);
+});
+
+test('missing site access pauses the run before anything opens', async () => {
+  const s = await setup({ permitted: false });
+  await s.runner.recover();
+  await s.runner.run({ countdown: false });
+  assert.equal(s.storage.data.get(KEYS.run).pausedReason, 'permission');
+  assert.equal(s.tabs.created.length, 0);
+});
+
+test('a damaged stored PDF is caught before the form opens', async () => {
+  const s = await setup();
+  const [job] = s.jobs;
+  const rec = s.job(job.approvalId);
+  s.patchJob(job.approvalId, { job: { ...rec.job, resume: { ...rec.job.resume, b64: Buffer.from('%PDF-1.7 other').toString('base64') } } });
+  await s.runner.recover();
+  await s.runner.run({ countdown: false });
+  const [r] = await s.results();
+  assert.equal(r.outcome, 'needs_you');
+  assert.equal(r.reasons[0].code, 'resume_corrupt');
+  assert.equal(s.tabs.created.length, 0);
+});
+
+test('a redirect off the ATS host is needs_you and nothing is filled', async () => {
+  const s = await setup();
+  s.tabs.landOn = () => 'https://careers.acme.example/jobs/1';
+  await s.runner.recover();
+  await s.runner.run({ countdown: false });
+  const [r] = await s.results();
+  assert.equal(r.outcome, 'needs_you');
+  assert.equal(r.reasons[0].code, 'redirected');
+  assert.equal(pageCalls(s, 'fill'), 0);
+  assert.equal(s.bridge.sent.length, 0);
+});
+
+test('blockers from the audit give needs_you with a banner and no claim', async () => {
+  const s = await setup();
+  s.scripting.handlers.audit = () => ({
+    fingerprint: 'fp-1', relaxations: [], submit: null, report: [],
+    blockers: [{ code: 'demographic', text: 'A demographic question needs you: Gender' }, { code: 'no_or_ambiguous_submit', text: 'x' }],
+  });
+  await s.runner.recover();
+  await s.runner.run({ countdown: false });
+  const [r] = await s.results();
+  assert.deepEqual(r.reasons.map((x: Json) => x.code), ['demographic', 'no_or_ambiguous_submit']);
+  assert.equal(pageCalls(s, 'bannerNeedsYou'), 1);
+  assert.equal(s.bridge.sent.length, 0);
+});
+
+test('relaxations go into the claim only while the matching setting is on', async () => {
+  const relaxed = () => ({
+    fingerprint: 'fp-1', blockers: [], report: [], submit: { path: '#s', label: 'Submit application' },
+    relaxations: ['invisible_captcha', 'optional_sensitive_blank'],
+  });
+  const on = await setup();
+  on.scripting.handlers.audit = relaxed;
+  await on.runner.recover();
+  await on.runner.run({ countdown: false });
+  assert.deepEqual(on.bridge.sent[0].relaxations, ['invisible_captcha', 'optional_sensitive_blank']);
+
+  const off = await setup({ settings: { auto: { lever: true }, allowInvisibleCaptcha: false, allowOptionalSensitiveBlank: false } });
+  off.scripting.handlers.audit = relaxed;
+  await off.runner.recover();
+  await off.runner.run({ countdown: false });
+  assert.equal(off.bridge.sent.length, 0);
+  const [r] = await off.results();
+  assert.deepEqual(r.reasons.map((x: Json) => x.code), ['captcha', 'demographic']);
+});
+
+// ---- cancel, watch, results ----------------------------------------------------------------------
+
+test('cancelling while the form is filling stops before the claim', async () => {
+  const s = await setup();
+  const [job] = s.jobs;
+  s.scripting.handlers.fill = () => {
+    void cancelJobs(s.storage, [job.approvalId], T0);
+    return { filled: [], blockers: [], resumeInputPath: '' };
+  };
+  await s.runner.recover();
+  await s.runner.run({ countdown: false });
+  await tick(5);
+  assert.equal(s.bridge.sent.length, 0);
+  assert.equal(s.job(job.approvalId).state, 'cancelled');
+  assert.equal(s.tabs.open.size, 0);
+});
+
+test('cancel answers cancelled before the claim and tooLate after it', async () => {
+  const s = await setup({ jobs: [makeJob(), makeJob()] });
+  const [a, b] = s.jobs;
+  s.patchJob(b.approvalId, { state: 'claiming' });
+  const r = await cancelJobs(s.storage, [a.approvalId, b.approvalId], T0);
+  assert.deepEqual(r, { cancelled: [a.approvalId], tooLate: [b.approvalId] });
+  const held = await heldSummary(s.storage, { runnerOpen: true });
+  assert.deepEqual(held.held, [b.approvalId]);
+});
+
+test('a watched needs-you tab that you submit yourself is recorded as a second result, by you', async () => {
+  const s = await setup();
+  const [job] = s.jobs;
+  s.scripting.handlers.audit = () => ({ fingerprint: 'fp-1', blockers: [{ code: 'unanswered_required', text: 'Needs your answer: Start date' }], relaxations: [], report: [], submit: null });
+  await s.runner.recover();
+  await s.runner.run({ countdown: false });
+  const tabId = s.job(job.approvalId).tabId;
+  assert.ok(s.storage.data.has(KEYS.watch(tabId)));
+  const thanks = job.applyUrls[0].replace(/\/apply$/, '/thanks');
+  assert.equal(s.runner.onPageEvent({ kind: 'confirmed', text: 'Thank you for applying.' }, { tab: { id: tabId }, url: thanks }), true);
+  await until(async () => (await s.results()).length === 2, 'the second result');
+  const [, second] = await s.results();
+  assert.equal(second.outcome, 'submitted');
+  assert.equal(second.clickedBy, 'you');
+  assert.equal(second.clicked, false);
+  assert.equal(second.pageUrl, thanks);
+  assert.equal(s.storage.data.has(KEYS.watch(tabId)), false);
+});
+
+test('results stay in storage until the dashboard acknowledges them', async () => {
+  const s = await setup();
+  const [job] = s.jobs;
+  await s.runner.recover();
+  await s.runner.run({ countdown: false });
+  const [r] = await s.results();
+  await s.make().recover();
+  assert.deepEqual((await s.results()).map((x: Json) => x.resultId), [r.resultId], 'a restart keeps unacknowledged results');
+  assert.deepEqual(await ackResults(s.storage, [randomUUID()], T0), { acked: [] });
+  assert.equal((await s.results()).length, 1);
+  assert.deepEqual(await ackResults(s.storage, [r.resultId], T0), { acked: [r.resultId] });
+  assert.deepEqual(await s.results(), []);
+  assert.equal(s.job(job.approvalId).ackedAt, iso(T0));
+  assert.equal(await cleanup(s.storage, T0 + 6 * 24 * HOUR), 0);
+  assert.equal(await cleanup(s.storage, T0 + 7 * 24 * HOUR), 1);
+  assert.equal(s.job(job.approvalId), undefined);
+});
+
+test('re-sending an accepted job is a no-op', async () => {
+  const s = await setup();
+  const r = await acceptBatch(s.storage, { jobs: [s.jobs[0]] }, { now: T0, sha256 });
+  assert.deepEqual(r, { accepted: [s.jobs[0].approvalId], rejected: [] });
+});
+
+// ---- validateJob ---------------------------------------------------------------------------------
+
+test('validateJob refuses anything that is not exactly the approved job', async () => {
+  const ctx = { now: T0, sha256, ledger: () => undefined, watchedKeys: new Set<string>() };
+  assert.equal(await validateJob(makeJob(), ctx), '');
+  const bad = async (over: Json, pattern: RegExp) => assert.match(await validateJob(makeJob(over), ctx), pattern, JSON.stringify(Object.keys(over)));
+  await bad({ approvalId: 'not-a-uuid' }, /isn't valid/);
+  await bad({ applyUrls: ['https://jobs.lever.co.evil.com/acme/x/apply'] }, /apply link/);
+  await bad({ applyUrls: ['http://jobs.lever.co/acme/5a1b2c3d-1111-2222-3333-444455556666/apply'] }, /apply link/);
+  await bad({ applyUrls: ['https://jobs.lever.co/acme/5a1b2c3d-1111-2222-3333-444455556666/apply'] }, /apply link/); // other job
+  await bad({ expiresAt: iso(T0 - 1) }, /expired/);
+  await bad({ expiresAt: iso(T0 + 25 * HOUR) }, /dates/);
+  const job = makeJob();
+  await bad({ resume: { ...job.resume, type: 'application/msword' } }, /resume file isn't valid/);
+  await bad({ resume: { ...job.resume, size: job.resume.size + 1 } }, /resume file isn't valid/);
+  await bad({ resume: { ...job.resume, b64: Buffer.from('not a pdf at all, really').toString('base64'), size: 24 } }, /resume file isn't valid/);
+  await bad({ resume: { ...job.resume, sha256: 'b'.repeat(64) } }, /doesn't match/);
+  await bad({ profile: { firstName: 'Test', lastName: 'Person' } }, /first name, last name and email/);
+});

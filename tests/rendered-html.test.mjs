@@ -69,3 +69,28 @@ test('built APIs persist reviewed text and enforce ownership and expected descri
   assert.equal(needsKey.status, 503); assert.match((await needsKey.json()).error, /ANTHROPIC_API_KEY/);
   assert.equal(sqlite.prepare('SELECT count(*) AS n FROM ai_operations').get().n, 0);
 });
+test('built submission routes check sign-in first, then insist on a JSON body', async () => {
+  const owner = 'worker-submit@example.invalid';
+  const routes = [['/api/submissions', 'GET'], ['/api/submissions', 'PATCH'], ['/api/submissions/approve', 'POST'],
+    ['/api/submissions/claim', 'POST'], ['/api/submissions/results', 'POST']];
+  for (const [path, method] of routes) {
+    assert.equal((await request(path, { method, ...(method === 'GET' ? {} : { body: {} }) })).status, 401, `${method} ${path} unsigned`);
+  }
+  const env = { ASSETS: { fetch: async () => new Response('Not found', { status: 404 }) }, DB };
+  for (const [path, method] of routes.filter(([, m]) => m !== 'GET')) {
+    // No header (a plain string body becomes text/plain), HTML form posts, and a lookalike type are all refused.
+    const form = new FormData(); form.set('approvalId', 'x');
+    for (const [type, body] of [[null, '{}'], ['text/plain', '{}'], ['application/x-www-form-urlencoded', 'a=1'], [null, form], ['application/jsonx', '{}']]) {
+      const headers = { 'oai-authenticated-user-email': owner, ...(type ? { 'content-type': type } : {}) };
+      const response = await worker.fetch(new Request('http://localhost' + path, { method, headers, body }), env, context);
+      assert.equal(response.status, 415, `${method} ${path} as ${type ?? (typeof body === 'string' ? 'text/plain' : 'multipart')}`);
+    }
+  }
+  // Signed JSON gets through to the handlers, which make no outbound calls.
+  assert.equal((await request('/api/submissions', { owner })).status, 200);
+  assert.equal((await request('/api/submissions', { owner, method: 'PATCH', body: { action: 'nothing' } })).status, 400);
+  assert.equal((await request('/api/submissions/approve', { owner, method: 'POST', body: { items: [] } })).status, 400);
+  const claim = await request('/api/submissions/claim', { owner, method: 'POST', body: {} });
+  assert.equal(claim.status, 200); assert.deepEqual(await claim.json(), { ok: false, reason: 'invalid_request' });
+  assert.equal((await request('/api/submissions/results', { owner, method: 'POST', body: { results: [] } })).status, 200);
+});

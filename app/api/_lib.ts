@@ -25,6 +25,12 @@ export function apiError(error: unknown) {
   return Response.json({ error: "Something went wrong. Try again." }, { status: 500 });
 }
 
+// Requiring a JSON body forces a CORS preflight for any cross-site request: a cheap CSRF guard.
+export function requireJson(request: Request) {
+  if (/^application\/json\s*(;|$)/i.test(request.headers.get("content-type") ?? "")) return null;
+  return Response.json({ error: "Send the request as JSON." }, { status: 415 });
+}
+
 export function clean(value: unknown, max = 500) {
   return typeof value === "string" ? value.trim().slice(0, max) : "";
 }

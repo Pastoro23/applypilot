@@ -1,0 +1,70 @@
+<!doctype html>
+<!-- Synthetic Greenhouse-like application page for scripts/test-extension.mjs. Not a copy of any real board.
+     The test fills the slot:head, slot:top, slot:fields, slot:after and slot:script comments and the
+     resume and submit placeholders, which default to the markup in the test script. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Job Application for Help Desk Technician at Acme Example</title>
+<style>
+  body { font: 15px/1.4 sans-serif; margin: 24px; }
+  .field { margin: 10px 0; }
+  .field label { display: block; }
+  .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .chip { display: inline-block; padding: 2px 6px; border: 1px solid #999; }
+  .drop-zone { border: 2px dashed #999; padding: 12px; }
+  .select__control { border: 1px solid #999; padding: 4px; min-height: 24px; }
+  [role=listbox] { border: 1px solid #333; background: #fff; }
+  [role=option] { padding: 4px; }
+</style>
+<!--slot:head-->
+</head>
+<body>
+<header><a href="/acme">Acme Example</a></header>
+<!--slot:top-->
+<main>
+  <h1 class="job__title">Help Desk Technician</h1>
+  <p class="job__location">Atlanta, GA</p>
+  <form id="application-form" action="/acme/jobs/4012345/applications" method="post">
+    <div class="field"><label for="first_name">First Name<span class="asterisk">*</span></label><input id="first_name" name="first_name" type="text" aria-required="true"></div>
+    <div class="field"><label for="last_name">Last Name<span class="asterisk">*</span></label><input id="last_name" name="last_name" type="text" aria-required="true"></div>
+    <div class="field"><label for="email">Email<span class="asterisk">*</span></label><input id="email" name="email" type="text" aria-required="true"></div>
+    <div class="field"><label for="phone">Phone</label><input id="phone" name="phone" type="tel"></div>
+    {{resume}}
+    <div class="field"><label for="question_1001">LinkedIn Profile</label><input id="question_1001" name="question_1001" type="text"></div>
+    <!--slot:fields-->
+    {{submit}}
+  </form>
+  <!--slot:after-->
+</main>
+<script>
+  window.__clicks = [];
+  window.__submits = 0;
+  document.addEventListener("click", (e) => {
+    const b = e.target.closest && e.target.closest("button,input,[role=button],a");
+    if (b) window.__clicks.push(b.id || b.textContent.trim());
+  }, true);
+  document.addEventListener("submit", (e) => {
+    e.preventDefault();
+    window.__submits++;
+    window.dispatchEvent(new Event("fixture-submit"));
+  }, true);
+  // Upload widget: a short "Uploading…" state, then a chip with the file name.
+  const resume = document.getElementById("resume");
+  if (resume && resume.dataset.upload !== "drop") {
+    resume.addEventListener("change", () => {
+      const status = document.getElementById("resume-status");
+      status.innerHTML = '<span class="spinner">Uploading…</span>';
+      setTimeout(() => {
+        status.textContent = "";
+        const chip = document.createElement("span");
+        chip.className = "chip";
+        chip.textContent = resume.files[0] ? resume.files[0].name : "";
+        status.append(chip);
+      }, 400);
+    });
+  }
+</script>
+<!--slot:script-->
+</body>
+</html>

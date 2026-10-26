@@ -1,0 +1,56 @@
+<!doctype html>
+<!-- Synthetic Lever-like application page for scripts/test-extension.mjs. Server-rendered, mostly native
+     controls, labels that wrap their fields and a "✱" required marker. Same slots as greenhouse.html. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Acme Example - Help Desk Technician</title>
+<style>
+  body { font: 15px/1.4 sans-serif; margin: 24px; }
+  ul { list-style: none; padding: 0; }
+  .application-question { margin: 10px 0; }
+  .application-label { font-weight: 600; }
+</style>
+<!--slot:head-->
+</head>
+<body>
+<!--slot:top-->
+<div class="posting-headline"><h2>Help Desk Technician</h2><div class="posting-categories">Atlanta, GA · IT</div></div>
+<form id="application-form" action="/acme/0f6e1c2a-1111-4222-8333-944455556666/apply" method="POST" enctype="multipart/form-data">
+  <h4>Submit your application</h4>
+  <ul>
+    <li class="application-question resume"><label><div class="application-label">Resume/CV<span class="required">✱</span></div>
+      <div class="application-field"><input type="file" name="resume" id="resume-upload-input" required></div></label></li>
+    <li class="application-question"><label><div class="application-label">Full name<span class="required">✱</span></div>
+      <div class="application-field"><input type="text" name="name" required></div></label></li>
+    <li class="application-question"><label><div class="application-label">Email<span class="required">✱</span></div>
+      <div class="application-field"><input type="email" name="email" required></div></label></li>
+    <li class="application-question"><label><div class="application-label">Phone</div>
+      <div class="application-field"><input type="text" name="phone"></div></label></li>
+    <li class="application-question"><label><div class="application-label">Current company</div>
+      <div class="application-field"><input type="text" name="org"></div></label></li>
+    <li class="application-question"><label><div class="application-label">LinkedIn URL</div>
+      <div class="application-field"><input type="text" name="urls[LinkedIn]"></div></label></li>
+    <!--slot:fields-->
+  </ul>
+  <div class="application-question"><label><div class="application-label">Additional information</div>
+    <textarea name="comments" placeholder="Add a cover letter or anything else you want to share."></textarea></label></div>
+  {{submit}}
+</form>
+<!--slot:after-->
+<script>
+  window.__clicks = [];
+  window.__submits = 0;
+  document.addEventListener("click", (e) => {
+    const b = e.target.closest && e.target.closest("button,input,[role=button],a");
+    if (b) window.__clicks.push(b.id || b.textContent.trim());
+  }, true);
+  document.addEventListener("submit", (e) => {
+    e.preventDefault();
+    window.__submits++;
+    window.dispatchEvent(new Event("fixture-submit"));
+  }, true);
+</script>
+<!--slot:script-->
+</body>
+</html>

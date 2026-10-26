@@ -1,8 +1,24 @@
 {
   "manifest_version": 3,
   "name": "ApplyPilot Application Assistant",
-  "version": "2.1.0",
-  "description": "Detect hiring platforms, fill approved answers, attach a resume, and pause for review before submission.",
+  "version": "3.0.0",
+  "description": "Fills approved answers and attaches each job's own resume. Submits only applications you approved in ApplyPilot and stops for anything that needs you.",
   "permissions": ["activeTab", "scripting", "storage", "unlimitedStorage"],
-  "action": {"default_title": "ApplyPilot Application Assistant", "default_popup": "popup.html"}
+  "host_permissions": [
+    "https://job-boards.greenhouse.io/*",
+    "https://boards.greenhouse.io/*",
+    "https://jobs.lever.co/*",
+    "https://jobs.eu.lever.co/*",
+    "https://jobs.ashbyhq.com/*"
+  ],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "content_scripts": [
+    {
+      "matches": ["https://applypilot-hub.amused-bream-5718.chatgpt.site/*"],
+      "js": ["bridge.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "action": { "default_title": "ApplyPilot Application Assistant", "default_popup": "popup.html" }
 }

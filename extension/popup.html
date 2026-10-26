@@ -13,5 +13,7 @@
   <p id="result" role="status" aria-live="polite"></p>
   <section id="report" class="report" hidden><div><b id="filled">0</b><span>Filled</span></div><div><b id="blocked">0</b><span>Needs you</span></div><div><b id="uploaded">No</b><span>Resume</span></div></section>
   <section id="blockers" class="blockers" hidden><strong>Review these questions</strong><ul id="blocker-list"></ul></section>
-  <aside><strong>Final approval stays with you.</strong><p>ApplyPilot never handles passwords, CAPTCHAs, demographic choices, legal attestations, or the final Submit button.</p></aside>
+  <section class="runner"><strong id="runner-status">Batch runner: nothing queued</strong><div class="runner-actions"><button id="stop-runner" class="secondary" hidden>Stop</button><button id="open-runner" class="secondary">Open runner</button></div></section>
+  <button id="snapshot" class="secondary">Save form snapshot</button>
+  <aside><strong>The popup never clicks Submit.</strong><p>Only jobs you approved in ApplyPilot are submitted, by the runner, under strict rules.</p></aside>
 </main><script src="popup.js"></script></body></html>

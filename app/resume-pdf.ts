@@ -39,10 +39,17 @@ function wrap(text: string, font: PDFFont, size: number, width: number) {
   return lines;
 }
 
-export async function buildResumePdf(resume: TailoredResume["resume"]) {
-  const pdf = await PDFDocument.create();
+// Fixed metadata and a caller-chosen date make the bytes reproducible: one tailored revision, one file hash.
+export async function buildResumePdf(resume: TailoredResume["resume"], opts: { date?: Date } = {}) {
+  const date = opts.date ?? new Date();
+  if (Number.isNaN(date.getTime())) throw new Error("The resume date is not valid.");
+  const pdf = await PDFDocument.create({ updateMetadata: false });
   pdf.setTitle(`${pdfSafe(resume.name)} Resume`);
   pdf.setAuthor(pdfSafe(resume.name));
+  pdf.setCreator("ApplyPilot");
+  pdf.setProducer("ApplyPilot");
+  pdf.setCreationDate(date);
+  pdf.setModificationDate(date);
   const regular = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
   const italic = await pdf.embedFont(StandardFonts.HelveticaOblique);

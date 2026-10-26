@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const profiles = sqliteTable("profiles", {
   ownerEmail: text("owner_email").primaryKey(),
@@ -25,6 +25,7 @@ export const profiles = sqliteTable("profiles", {
   identityStatus: text("identity_status").notNull().default("needs_confirmation"),
   locationStatus: text("location_status").notNull().default("needs_confirmation"),
   workHistoryStatus: text("work_history_status").notNull().default("needs_confirmation"),
+  applySettings: text("apply_settings_json").notNull().default("{}"),
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
 
@@ -153,4 +154,61 @@ export const foundJobs = sqliteTable(
     foundAt: text("found_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => [uniqueIndex("found_jobs_owner_job_unique").on(table.ownerEmail, table.kind, table.externalId)],
+);
+
+// One row per approval to submit a job. state: approved | claimed | submitted | needs_you | check | not_sent | revoked | expired.
+// The partial unique index keeps at most one live row per job; submitted is left out so a late result never hits a constraint.
+export const submissions = sqliteTable(
+  "submissions",
+  {
+    id: text("id").primaryKey(),
+    ownerEmail: text("owner_email").notNull(),
+    applicationId: text("application_id").notNull(),
+    jobKey: text("job_key").notNull(),
+    ats: text("ats").notNull(),
+    applyUrl: text("apply_url").notNull(),
+    tailoredRevision: integer("tailored_revision").notNull(),
+    profileHash: text("profile_hash").notNull(),
+    includeCoverLetter: integer("include_cover_letter").notNull().default(1),
+    supersedesId: text("supersedes_id"),
+    state: text("state").notNull().default("approved"),
+    reason: text("reason").notNull().default(""),
+    reasonsJson: text("reasons_json").notNull().default("[]"),
+    approvedAt: text("approved_at").notNull(),
+    expiresAt: text("expires_at").notNull(),
+    attemptId: text("attempt_id"),
+    claimMode: text("claim_mode").notNull().default(""),
+    claimedAt: text("claimed_at"),
+    relaxations: text("relaxations").notNull().default(""),
+    clickedBy: text("clicked_by").notNull().default(""),
+    resumeSha256: text("resume_sha256").notNull().default(""),
+    resumeFilename: text("resume_filename").notNull().default(""),
+    fillReportJson: text("fill_report_json").notNull().default("[]"),
+    pageUrl: text("page_url").notNull().default(""),
+    confirmationText: text("confirmation_text").notNull().default(""),
+    finishedAt: text("finished_at"),
+    extensionVersion: text("extension_version").notNull().default(""),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("submissions_one_live_job").on(table.ownerEmail, table.jobKey)
+      .where(sql`state IN ('approved','claimed','check')`),
+    index("submissions_owner_app").on(table.ownerEmail, table.applicationId),
+    index("submissions_owner_claimed").on(table.ownerEmail, table.claimedAt),
+  ],
+);
+
+// Append-only audit trail for submissions; kept when an application is deleted.
+export const submissionEvents = sqliteTable(
+  "submission_events",
+  {
+    id: text("id").primaryKey(),
+    ownerEmail: text("owner_email").notNull(),
+    submissionId: text("submission_id").notNull(),
+    at: text("at").notNull(),
+    actor: text("actor").notNull(),
+    event: text("event").notNull(),
+    detailJson: text("detail_json").notNull().default("{}"),
+  },
+  (table) => [index("submission_events_owner_sub").on(table.ownerEmail, table.submissionId)],
 );

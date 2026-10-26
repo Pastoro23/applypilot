@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildAutofillProfile, cleanRecords, cleanYesNo, workFields } from '../app/profile-records.ts';
+import { autofillProfileFromRow, buildAutofillProfile, cleanRecords, cleanYesNo, profileHash, sha256Hex, workFields } from '../app/profile-records.ts';
 
 const base = {
   firstName: 'Peter', lastName: 'Olatunde', legalName: 'Peter Olatunde', profileEmail: 'p@example.com', phone: '1',
@@ -42,4 +42,25 @@ test('export carries the v2.1 fields the assistant reads', () => {
   assert.deepEqual(out.skills, ['Active Directory', 'Windows 11', 'ServiceNow']);
   assert.deepEqual(out.workHistory, [{ company: 'Modern Technology', title: 'IT Support', current: true }]);
   assert.deepEqual(out.education, [{ school: 'Georgia State', degree: 'BS' }]);
+});
+
+test('profile hash is stable and changes when the phone changes', async () => {
+  const first = await profileHash(buildAutofillProfile(base));
+  assert.match(first, /^[0-9a-f]{64}$/);
+  assert.equal(await profileHash(buildAutofillProfile({ ...base })), first);
+  assert.notEqual(await profileHash(buildAutofillProfile({ ...base, phone: '2' })), first);
+  assert.equal(await sha256Hex('abc'), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
+  assert.equal(await sha256Hex(new TextEncoder().encode('abc')), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
+});
+
+test('a D1 profile row hashes the same as the dashboard copy of it', async () => {
+  const row = {
+    owner_email: 'p@example.com', first_name: 'Peter', last_name: 'Olatunde', legal_name: 'Peter Olatunde', profile_email: 'p@example.com',
+    phone: '1', city: 'Grayson', state: 'GA', postal_code: '30017', country: 'United States', linkedin: '',
+    work_authorization: base.workAuthorization, sponsorship: base.sponsorship, work_authorized: '', requires_sponsorship: '',
+    skills: '', work_history_json: '[]', education_json: '[]', identity_status: 'confirmed', apply_settings_json: '{}',
+  };
+  assert.deepEqual(autofillProfileFromRow(row), base);
+  assert.equal(await profileHash(buildAutofillProfile(autofillProfileFromRow(row))), await profileHash(buildAutofillProfile(base)));
+  assert.equal(autofillProfileFromRow({ first_name: null }).firstName, '');
 });

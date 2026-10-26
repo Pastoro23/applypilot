@@ -116,3 +116,44 @@ export function buildAutofillProfile(profile: ProfileForExport) {
     education: cleanRecords<EducationRecord>(profile.education, educationFields),
   };
 }
+
+export async function sha256Hex(data: string | Uint8Array): Promise<string> {
+  const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data.slice();
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+// Ties an approval to the exact answers it was made with; any change to them means approving again.
+export async function profileHash(exported: ReturnType<typeof buildAutofillProfile>) {
+  return sha256Hex(JSON.stringify(exported));
+}
+
+const rowColumns: Record<keyof ProfileForExport, string> = {
+  firstName: "first_name",
+  lastName: "last_name",
+  legalName: "legal_name",
+  profileEmail: "profile_email",
+  phone: "phone",
+  city: "city",
+  state: "state",
+  postalCode: "postal_code",
+  country: "country",
+  linkedIn: "linkedin",
+  workAuthorization: "work_authorization",
+  sponsorship: "sponsorship",
+  workAuthorized: "work_authorized",
+  requiresSponsorship: "requires_sponsorship",
+  skills: "skills",
+  workHistory: "work_history_json",
+  education: "education_json",
+};
+
+// A raw profiles row from D1 (snake_case) in the shape the dashboard holds, so both sides hash the same thing.
+export function autofillProfileFromRow(row: Record<string, unknown>): ProfileForExport {
+  const out = {} as ProfileForExport;
+  for (const [key, column] of Object.entries(rowColumns) as [keyof ProfileForExport, string][]) {
+    const value = row[column];
+    out[key] = typeof value === "string" ? value : "";
+  }
+  return out;
+}

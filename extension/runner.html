@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ApplyPilot Runner</title>
+  <link rel="stylesheet" href="runner.css">
+</head>
+<body>
+<main>
+  <header>
+    <span class="logo" aria-hidden="true">➤</span>
+    <div><h1>ApplyPilot</h1><p>Sending the applications you approved</p></div>
+    <span id="bridge" class="pill">Checking ApplyPilot…</span>
+  </header>
+
+  <section id="duplicate" class="card warn" hidden>
+    <strong>ApplyPilot is already sending from another window.</strong>
+    <p>Close this tab and use the other runner window.</p>
+  </section>
+
+  <section id="status" class="card">
+    <div class="status-line"><i id="dot"></i><strong id="run-title">Starting…</strong></div>
+    <p id="run-detail"></p>
+    <div class="actions">
+      <button id="pause" type="button" hidden>Pause</button>
+      <button id="resume" type="button" hidden>Resume</button>
+      <button id="allow" type="button" hidden>Allow on Greenhouse, Lever and Ashby</button>
+      <button id="open-dashboard" type="button" class="secondary" hidden>Open ApplyPilot</button>
+      <button id="stop" type="button" class="danger" hidden>Stop</button>
+    </div>
+  </section>
+
+  <section id="waiting" class="card attention" hidden>
+    <strong id="waiting-title"></strong>
+    <p>Check the highlighted form against what you approved, then click Submit application on the page yourself. Skip it if you'd rather not send it now.</p>
+    <div class="actions">
+      <button id="show-tab" type="button">Show the form</button>
+      <button id="skip" type="button" class="secondary">Skip</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Queue</h2>
+    <ol id="queue" class="queue"></ol>
+    <p id="empty" class="muted">Nothing approved yet. Approve jobs in ApplyPilot and they appear here.</p>
+  </section>
+
+  <aside>
+    <strong>Keep this window open while ApplyPilot sends.</strong>
+    <p>It submits only jobs you approved, once each, with that job's own resume. It stops and leaves the tab open for anything that needs you: CAPTCHAs, sign-ins, passwords, legal certifications, demographic and other sensitive questions, and questions it can't answer.</p>
+  </aside>
+</main>
+<script type="module" src="runner.js"></script>
+</body>
+</html>

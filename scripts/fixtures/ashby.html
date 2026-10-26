@@ -1,0 +1,74 @@
+<!doctype html>
+<!-- Synthetic Ashby-like application page for scripts/test-extension.mjs. Client-rendered: the form appears
+     800 ms after load. Yes/No questions are button pairs with aria-pressed, a separate "Autofill from resume"
+     uploader sits above the form, and success is shown in the page without a URL change.
+     Same slots as greenhouse.html; slots inside the form live in the <template>. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Help Desk Technician @ Acme Example</title>
+<style>
+  body { font: 15px/1.4 sans-serif; margin: 24px; }
+  .field-entry { margin: 10px 0; }
+  .field-entry > label { display: block; }
+  .yesno button[aria-pressed=true] { background: #2f7df6; color: #fff; }
+</style>
+<!--slot:head-->
+</head>
+<body>
+<!--slot:top-->
+<div id="app"><p>Loading…</p></div>
+<template id="form-tpl">
+  <h1 class="ashby-job-posting-heading">Help Desk Technician</h1>
+  <div class="autofill-pane">
+    <label for="autofill-upload">Autofill from resume</label>
+    <p>Upload your resume here to autofill key application fields.</p>
+    <input type="file" id="autofill-upload">
+  </div>
+  <form class="ashby-application-form">
+    <div class="field-entry"><label for="_systemfield_name">Name<span class="req">*</span></label><input id="_systemfield_name" name="_systemfield_name" type="text" required></div>
+    <div class="field-entry"><label for="_systemfield_email">Email<span class="req">*</span></label><input id="_systemfield_email" name="_systemfield_email" type="email" required></div>
+    <div class="field-entry" name="_systemfield_resume"><label for="_systemfield_resume">Resume<span class="req">*</span></label><input id="_systemfield_resume" type="file" required></div>
+    <div class="field-entry" id="q-auth"><label>Are you legally authorized to work in the United States?*</label>
+      <div class="yesno"><button type="button" aria-pressed="false">Yes</button><button type="button" aria-pressed="false">No</button></div></div>
+    <div class="field-entry" id="q-spon"><label>Will you now or in the future require visa sponsorship?*</label>
+      <div class="yesno"><button type="button" aria-pressed="false">Yes</button><button type="button" aria-pressed="false">No</button></div></div>
+    <!--slot:fields-->
+    {{submit}}
+  </form>
+  <!--slot:after-->
+</template>
+<script>
+  window.__clicks = [];
+  window.__submits = 0;
+  document.addEventListener("click", (e) => {
+    const b = e.target.closest && e.target.closest("button,input,[role=button],a");
+    if (b) window.__clicks.push(b.id || b.textContent.trim());
+  }, true);
+  document.addEventListener("submit", (e) => {
+    e.preventDefault();
+    window.__submits++;
+    window.dispatchEvent(new Event("fixture-submit"));
+  }, true);
+  setTimeout(() => {
+    const app = document.getElementById("app");
+    app.replaceChildren(document.getElementById("form-tpl").content.cloneNode(true));
+    for (const group of app.querySelectorAll(".yesno")) {
+      group.addEventListener("click", (e) => {
+        const b = e.target.closest("button");
+        if (!b || !b.hasAttribute("aria-pressed")) return;
+        for (const x of group.querySelectorAll("button")) x.setAttribute("aria-pressed", String(x === b));
+      });
+    }
+    window.addEventListener("fixture-submit", () => {
+      if (window.__ashbyOutcome === "none") return;
+      setTimeout(() => {
+        app.innerHTML = "<div class='ashby-application-form-success-container'><h2>Thank you for applying</h2><p>Your application was submitted. We'll be in touch.</p></div>";
+      }, 300);
+    });
+    window.dispatchEvent(new Event("fixture-ready"));
+  }, 800);
+</script>
+<!--slot:script-->
+</body>
+</html>
