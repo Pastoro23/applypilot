@@ -748,8 +748,59 @@ test("Greenhouse's newer form: names cleared by a late re-render are typed again
     },
   ));
 
+// The page reads the resume and resets the form a few seconds after the file is taken, the way Greenhouse's
+// autofill from a resume does; every answer must still be there when the form is checked.
+const remixWith = (cfg, opts = {}) =>
+  fixture("greenhouse-remix.html").then((html) =>
+    prepare("greenhouse", {}, {
+      profile: EDU_PROFILE,
+      settings: { allowPrivacyAck: true },
+      fill: { allowPrivacyAck: true },
+      ...opts,
+      html: html.replace("<!--slot:script-->", () => `<script>window.__remix = ${JSON.stringify(cfg)};</script>`),
+    }),
+  );
+const ALL_FILLED = {
+  country: "United States +1",
+  "candidate-location": "Grayson, Georgia, United States",
+  "school--0": "Georgia Piedmont Technical College",
+  "degree--0": "Associate's Degree",
+  "discipline--0": "Information Technology",
+  question_9601406101: "United States",
+  question_9601407101: "Georgia",
+};
+for (const [name, cfg] of [
+  ["in place, soon after the upload", { parseAfterMs: 2500, parsedFirstName: "PASTOR" }],
+  ["in place, while the dropdowns are being chosen", { parseAfterMs: 6000 }],
+  ["with new elements (a re-mount)", { parseAfterMs: 3000, remount: true, parsedFirstName: "PASTOR" }],
+])
+  test(`Greenhouse's newer form: a page that resets the form after reading the resume ${name} gets every answer again`, () =>
+    using(remixWith(cfg), async ({ page: p, filled, audit }) => {
+      assert.equal(await p.evaluate(() => window.__parsed), 1);
+      assert.deepEqual(await singles(p), ALL_FILLED);
+      const v = await values(p);
+      assert.deepEqual([v.first_name, v.last_name, v.email, v.phone, v["start-year--0"], v["end-year--0"], v[PRIVACY_BOX]], ["Test", "Person", "t@example.com", "555-010-0199", "2019", "2021", true]);
+      assert.deepEqual(codes(audit), [], JSON.stringify(audit.blockers));
+      // A re-mounted input may or may not keep the file; either way the widget must show it.
+      assert.ok(["file", "chip"].includes(audit.resumeVerifiedBy), audit.resumeVerifiedBy);
+      assert.equal(filled.blockers.length, 0, JSON.stringify(filled.blockers));
+    }));
+
+test("Greenhouse's newer form: a resume the page never took is not counted as attached", () =>
+  using(remixWith({ ignoreChange: true }), async ({ page: p, filled, audit }) => {
+    assert.equal(await p.evaluate(() => window.__resumeTaken || 0), 0);
+    assert.ok(filled.blockers.some((b) => b.code === "resume_not_attached"), JSON.stringify(filled.blockers));
+    assert.ok(codes(audit).includes("resume_not_attached"), JSON.stringify(audit.blockers));
+  }));
+
+test("Greenhouse's newer form: when the hidden input ignores the file, dropping it on the upload box works", () =>
+  using(remixWith({ ignoreChange: true, acceptDrop: true }), async ({ page: p, audit }) => {
+    assert.equal(await p.evaluate(() => window.__resumeTaken || 0), 1);
+    assert.deepEqual(codes(audit), [], JSON.stringify(audit.blockers));
+  }));
+
 test("privacy-policy box: ticked under the setting and listed with the submission", () =>
-  using(remix(EDU_PROFILE, { fill: { allowPrivacyAck: true } }), async ({ page: p, filled, audit }) => {
+  using(remix(EDU_PROFILE, { settings: { allowPrivacyAck: true }, fill: { allowPrivacyAck: true } }), async ({ page: p, filled, audit }) => {
     assert.deepEqual(codes(audit), []);
     assert.deepEqual(audit.relaxations, ["privacy_ack"]);
     assert.equal((await values(p))[PRIVACY_BOX], true);
@@ -760,6 +811,14 @@ test("privacy-policy box: with the setting off it stays unticked and goes to you
   using(remix(EDU_PROFILE, { settings: { allowPrivacyAck: false }, fill: { allowPrivacyAck: false } }), async ({ page: p, audit }) => {
     assert.deepEqual(codes(audit), ["attestation"]);
     assert.equal((await values(p))[PRIVACY_BOX], false);
+  }));
+
+test("privacy-policy box: a dashboard that never offered the setting leaves it to you, and says why", () =>
+  using(remix(EDU_PROFILE, { settings: {}, fill: {} }), async ({ page: p, audit }) => {
+    assert.deepEqual(codes(audit), ["attestation"]);
+    assert.match(audit.blockers[0].text, /^The privacy-policy box is left for you \(ApplyPilot's privacy-box setting is off\): /);
+    assert.equal((await values(p))[PRIVACY_BOX], false);
+    assert.deepEqual(audit.relaxations, []);
   }));
 
 test("privacy-policy box: ticked under a setting that was then turned off still goes to you", () =>
@@ -781,7 +840,7 @@ for (const [name, legend] of [
         {
           fields: `<fieldset class="checkbox" id="q[]" aria-required="true"><legend>${legend} <span class="required">*</span></legend><input type="checkbox" required id="ack" name="q[]" value="1"><label for="ack">Yes</label></fieldset>`,
         },
-        { fill: { allowPrivacyAck: true } },
+        { settings: { allowPrivacyAck: true }, fill: { allowPrivacyAck: true } },
       ),
       async ({ page: p, audit }) => {
         assert.ok(codes(audit).includes("attestation"));
@@ -798,7 +857,7 @@ const remixDescription = (text) =>
   fixture("greenhouse-remix.html").then((html) => {
     const changed = html.replace(/(<div id="question_9601409101\[\]-description"[^>]*>\s*)<p>[\s\S]*?<\/p>/, (_, open) => `${open}<p>${text}</p>`);
     assert.notEqual(changed, html);
-    return prepare("greenhouse", {}, { html: changed, profile: EDU_PROFILE, fill: { allowPrivacyAck: true } });
+    return prepare("greenhouse", {}, { html: changed, profile: EDU_PROFILE, settings: { allowPrivacyAck: true }, fill: { allowPrivacyAck: true } });
   });
 test("privacy-policy box: a description on Greenhouse's newer form that adds terms, texts or arbitration still goes to you", () =>
   using(
@@ -833,7 +892,7 @@ const PRIVACY_PLUS = [
 ];
 for (const [name, ats, fields] of PRIVACY_PLUS)
   test(`privacy-policy box: more than the policy in ${name} still goes to you`, () =>
-    using(prepare(ats, { fields }, { fill: { allowPrivacyAck: true } }), async ({ page: p, audit }) => {
+    using(prepare(ats, { fields }, { settings: { allowPrivacyAck: true }, fill: { allowPrivacyAck: true } }), async ({ page: p, audit }) => {
       assert.ok(codes(audit).includes("attestation"), JSON.stringify(audit.blockers));
       assert.ok(!audit.relaxations.includes("privacy_ack"));
       assert.equal((await values(p)).ack, false);
@@ -849,7 +908,7 @@ const PRIVACY_ONLY = [
 ];
 for (const [name, ats, fields] of PRIVACY_ONLY)
   test(`privacy-policy box: ${name} is ticked and listed with the submission`, () =>
-    using(prepare(ats, { fields }, { fill: { allowPrivacyAck: true } }), async ({ page: p, audit }) => {
+    using(prepare(ats, { fields }, { settings: { allowPrivacyAck: true }, fill: { allowPrivacyAck: true } }), async ({ page: p, audit }) => {
       assert.deepEqual(codes(audit), []);
       assert.deepEqual(audit.relaxations, ["privacy_ack"]);
       assert.equal((await values(p)).ack, true);
@@ -1211,7 +1270,7 @@ test("snapshot keeps structure and leaves out every value", () =>
 test("installing twice keeps one library and its clicked flag", () =>
   using(prepare("greenhouse"), async ({ page: p, audit }) => {
     const first = await p.evaluate(() => (window.__first = globalThis.__applypilot, globalThis.__applypilot.version));
-    assert.equal(first, "3.1.0");
+    assert.equal(first, "3.1.1");
     assert.deepEqual((await press(p, audit.fingerprint)).r, { clicked: true });
     await p.addScriptTag({ path: LIB });
     const s = await p.evaluate((fp) => ({ same: window.__first === globalThis.__applypilot, again: globalThis.__applypilot.pressSubmit(fp), submits: window.__submits }), audit.fingerprint);
@@ -1683,7 +1742,7 @@ test("dashboard hook: a hello sent before the bridge loaded doesn't turn a conne
       window.__hellos = 0;
       let loaded = false, loading = false;
       const reply = (type, payload, replyTo) => window.postMessage({ channel: "applypilot", v: 1, from: "extension", type, id: crypto.randomUUID(), replyTo, payload }, location.origin);
-      const READY = { version: "3.1.0", held: [], running: false, resultsWaiting: 0 };
+      const READY = { version: "3.1.1", held: [], running: false, resultsWaiting: 0 };
       window.addEventListener("message", (e) => {
         const d = e.data;
         if (!d || d.channel !== "applypilot" || d.from !== "dashboard") return;

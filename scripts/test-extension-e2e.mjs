@@ -260,7 +260,7 @@ const jobState = async (approvalId) => (await extStorage())[`apJob:${approvalId}
 const dash = await context.newPage();
 await dash.goto(`${DASHBOARD}/`);
 const hello = await dash.evaluate(() => window.__hello());
-assert.equal(hello.version, "3.1.0", "the bridge answers on the dashboard origin");
+assert.equal(hello.version, "3.1.1", "the bridge answers on the dashboard origin");
 
 async function until(check, what, ms = 150000) {
   const deadline = Date.now() + ms;

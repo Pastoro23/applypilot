@@ -37,7 +37,7 @@ const SEARCH = {
   ],
 };
 
-for (const input of document.querySelectorAll("input.select__input[role=combobox]")) {
+function wire(input) {
   const shell = input.closest(".select-shell");
   const log = shell.querySelector("[role=log]");
   const valueBox = shell.querySelector(".select__value-container");
@@ -113,3 +113,79 @@ for (const input of document.querySelectorAll("input.select__input[role=combobox
     close();
   });
 }
+for (const input of document.querySelectorAll("input.select__input[role=combobox]")) wire(input);
+
+// The resume widget: a chosen file shows its name and a Remove button in place of the buttons, as Greenhouse does.
+// A test can set window.__remix before filling:
+//   ignoreChange: the hidden input ignores a change event a script sent (a real file picker's still counts);
+//   acceptDrop: with ignoreChange, a file dropped on the upload box is taken instead;
+//   parseAfterMs: that long after the file is taken, the page "reads" it and resets the form to what it found
+//     (everything empty except parsedFirstName), like Greenhouse's autofill from a resume;
+//   remount: the reset puts new elements in place of the old ones, as a React re-mount does.
+const upload = document.querySelector(".file-upload");
+const resumeInput = document.getElementById("resume");
+const cfg = () => window.__remix || {};
+function showFile(name) {
+  const wrap = upload.querySelector(".file-upload__wrapper");
+  wrap.querySelector(".button-container").style.display = "none";
+  wrap.querySelector(".file-upload__filename")?.remove();
+  const row = document.createElement("div");
+  row.className = "file-upload__filename";
+  const span = document.createElement("span");
+  span.textContent = name;
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "icon-button";
+  remove.setAttribute("aria-label", "Remove file");
+  remove.textContent = "×";
+  row.append(span, remove);
+  wrap.prepend(row);
+  window.__resumeTaken = (window.__resumeTaken || 0) + 1;
+  if (cfg().parseAfterMs) setTimeout(parse, cfg().parseAfterMs);
+}
+function clearField(el) {
+  if (el.matches("input.select__input")) {
+    const shell = el.closest(".select-shell");
+    const box = shell.querySelector(".select__value-container");
+    box.querySelector(".select__single-value")?.remove();
+    if (!box.querySelector(".select__placeholder")) {
+      const ph = document.createElement("div");
+      ph.className = "select__placeholder";
+      ph.id = `react-select-${el.id}-placeholder`;
+      ph.textContent = "Select...";
+      box.prepend(ph);
+    }
+    const proxy = shell.querySelector("input[aria-hidden=true]");
+    if (proxy) proxy.value = "";
+    el.value = "";
+  } else if (el.type === "checkbox" || el.type === "radio") el.checked = false;
+  else if (el.type !== "file") el.value = "";
+}
+function parse() {
+  window.__parsed = (window.__parsed || 0) + 1;
+  const form = document.getElementById("application-form");
+  if (cfg().remount) {
+    const old = form.querySelector(".application--questions");
+    const fresh = old.cloneNode(true);
+    for (const el of fresh.querySelectorAll("*")) {
+      for (const a of [...el.attributes]) if (a.name.startsWith("data-applypilot")) el.removeAttribute(a.name);
+      el.removeAttribute("style");
+    }
+    fresh.querySelector(".button-container").style.display = "none";
+    old.replaceWith(fresh);
+    for (const el of fresh.querySelectorAll("input,select,textarea")) clearField(el);
+    for (const input of fresh.querySelectorAll("input.select__input[role=combobox]")) wire(input);
+  } else for (const el of form.querySelectorAll("input,select,textarea")) clearField(el);
+  if (cfg().parsedFirstName) document.getElementById("first_name").value = cfg().parsedFirstName;
+}
+resumeInput.addEventListener("change", (e) => {
+  if (cfg().ignoreChange && !e.isTrusted) return;
+  if (resumeInput.files[0]) showFile(resumeInput.files[0].name);
+});
+upload.addEventListener("dragover", (e) => e.preventDefault());
+upload.addEventListener("drop", (e) => {
+  e.preventDefault();
+  if (cfg().ignoreChange && !cfg().acceptDrop) return;
+  const f = e.dataTransfer?.files?.[0];
+  if (f) showFile(f.name);
+});
