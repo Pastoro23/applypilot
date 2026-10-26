@@ -2,7 +2,7 @@ import type { SqlDatabase, SqlStatement } from "./ai-operations.ts";
 import { UserFacingError } from "./errors.ts";
 import { fetchBoardJobs, scoreJob, type Board, type BoardJob, type BoardKind, type JobSearch } from "./job-discovery.ts";
 
-export const MAX_SOURCES = 40;
+export const MAX_SOURCES = 100;
 const MAX_MATCHES_PER_SOURCE = 100;
 const RECHECK_AFTER_MS = 60_000;
 export const BOARDS_PER_CALL = 12;
