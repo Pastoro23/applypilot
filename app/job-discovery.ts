@@ -77,6 +77,19 @@ const httpsUrl = (value: unknown) => {
   }
 };
 
+// Lever lists carry full descriptions, so a big board is read in pages to stay under the size limit.
+const LEVER_PAGE = 100;
+const LEVER_MAX_PAGES = 4;
+async function leverPostings(token: string) {
+  const all: Record<string, unknown>[] = [];
+  for (let page = 0; page < LEVER_MAX_PAGES; page++) {
+    const batch = records(await getJson(`https://api.lever.co/v0/postings/${token}?mode=json&limit=${LEVER_PAGE}&skip=${page * LEVER_PAGE}`));
+    all.push(...batch);
+    if (batch.length < LEVER_PAGE) break;
+  }
+  return all;
+}
+
 export async function fetchBoardJobs(board: Board, label = ""): Promise<BoardJob[]> {
   const token = encodeURIComponent(board.token);
   const company = label || titleCase(board.token);
@@ -93,8 +106,7 @@ export async function fetchBoardJobs(board: Board, label = ""): Promise<BoardJob
       description: "", // Greenhouse lists omit descriptions; read when the job is added
     }));
   } else if (board.kind === "lever") {
-    const data = await getJson(`https://api.lever.co/v0/postings/${token}?mode=json`);
-    jobs = records(data).map((job) => {
+    jobs = (await leverPostings(token)).map((job) => {
       const categories = (job.categories ?? {}) as { location?: unknown; allLocations?: unknown };
       const lists = records(job.lists).map((list) => `${str(list.text)}\n${htmlToText(str(list.content))}`);
       return {

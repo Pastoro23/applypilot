@@ -175,16 +175,24 @@ export function FindJobsView<T extends TailorTarget>({
     event.preventDefault();
     setBusy("follow");
     setError("");
-    try {
-      await requestJson("/api/discovery", jsonBody("POST", { board, label }));
-      setBoard("");
-      setLabel("");
-      setBusy("");
-      await refreshBoards();
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Couldn't follow that company.");
-      setBusy("");
+    // Several links can be pasted at once, separated by spaces, commas or new lines.
+    const links = [...new Set(board.split(/[\s,]+/).filter(Boolean))];
+    const failed: string[] = [];
+    let followed = 0;
+    for (const link of links) {
+      try {
+        await requestJson("/api/discovery", jsonBody("POST", { board: link, label: links.length === 1 ? label : "" }));
+        followed++;
+      } catch (reason) {
+        failed.push(`${link}: ${reason instanceof Error ? reason.message : "couldn't follow it"}`);
+        if (reason instanceof Error && /up to \d+ companies/.test(reason.message)) break;
+      }
     }
+    setBoard(failed.length ? failed.map((line) => line.split(": ")[0]).join("\n") : "");
+    if (!failed.length) setLabel("");
+    setBusy("");
+    if (followed) await refreshBoards();
+    if (failed.length) setError(`Not followed:\n${failed.join("\n")}`);
   }
 
   async function unfollow(id: string) {
@@ -248,7 +256,7 @@ export function FindJobsView<T extends TailorTarget>({
 
       {(error || message || tailorNote) && (
         <div className="space-y-2" role="status">
-          {error && <p className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">{error}</p>}
+          {error && <p className="whitespace-pre-line rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">{error}</p>}
           {tailorNote && <p className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">{tailorNote}</p>}
           {message && <p className="rounded-xl border border-blue-500/30 bg-blue-500/10 px-4 py-3 text-sm text-blue-100">{message}</p>}
         </div>
@@ -267,9 +275,9 @@ export function FindJobsView<T extends TailorTarget>({
           </form>
         </Panel>
 
-        <Panel title="Companies you follow" note="Paste a company's jobs page on Greenhouse, Lever or Ashby, like jobs.lever.co/company.">
+        <Panel title="Companies you follow" note="Paste one or more companies' jobs pages on Greenhouse, Lever or Ashby, like jobs.lever.co/company, one per line.">
           <form onSubmit={follow} className="mt-5 grid gap-3 sm:grid-cols-[1fr_.6fr_auto]">
-            <input aria-label="Jobs page link" className={inputClass} placeholder="https://job-boards.greenhouse.io/company" value={board} onChange={(e) => setBoard(e.target.value)} />
+            <textarea aria-label="Jobs page links" rows={2} className={inputClass} placeholder="https://job-boards.greenhouse.io/company (paste one or many)" value={board} onChange={(e) => setBoard(e.target.value)} />
             <input aria-label="Company name" className={inputClass} placeholder="Name (optional)" value={label} onChange={(e) => setLabel(e.target.value)} />
             <button disabled={busy !== "" || !board.trim()} className={primaryButton}>{busy === "follow" ? "Adding…" : "Follow"}</button>
           </form>

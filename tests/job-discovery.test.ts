@@ -36,7 +36,7 @@ test('reads Greenhouse, Lever and Ashby job lists', async () => {
       { id: 11, title: 'IT Support Specialist', location: { name: 'Atlanta, GA' }, absolute_url: 'https://job-boards.greenhouse.io/acme/jobs/11', updated_at: day(2), company_name: 'Acme Health' },
       { id: 12, title: 'No link', location: { name: 'x' }, absolute_url: 'javascript:alert(1)' },
     ] },
-    'https://api.lever.co/v0/postings/beta?mode=json': [
+    'https://api.lever.co/v0/postings/beta?mode=json&limit=100&skip=0': [
       { id: 'lv1', text: 'Help Desk Technician', categories: { location: 'Remote' }, hostedUrl: 'https://jobs.lever.co/beta/lv1', createdAt: NOW - 86_400_000,
         descriptionPlain: 'Support users.', lists: [{ text: 'Requirements', content: '<li>Windows</li>' }] },
     ],
@@ -52,6 +52,20 @@ test('reads Greenhouse, Lever and Ashby job lists', async () => {
   assert.match(lv[0].description, /Support users\.[\s\S]*Requirements[\s\S]*Windows/);
   const ab = await fetchBoardJobs({ kind: 'ashby', token: 'gamma' });
   assert.deepEqual(ab.map((j) => [j.externalId, j.company, j.description]), [['ab1', 'Gamma', 'Fix laptops.']]);
+});
+
+test('reads a big Lever board in pages and stops at the last one', async () => {
+  const page = (from: number, n: number) => Array.from({ length: n }, (_, i) => ({
+    id: `p${from + i}`, text: 'Help Desk Technician', categories: { location: 'Remote' }, hostedUrl: `https://jobs.lever.co/big/p${from + i}`, createdAt: NOW,
+  }));
+  stubFetch({
+    'https://api.lever.co/v0/postings/big?mode=json&limit=100&skip=0': page(0, 100),
+    'https://api.lever.co/v0/postings/big?mode=json&limit=100&skip=100': page(100, 100),
+    'https://api.lever.co/v0/postings/big?mode=json&limit=100&skip=200': page(200, 37),
+  });
+  const jobs = await fetchBoardJobs({ kind: 'lever', token: 'big' });
+  assert.equal(jobs.length, 237);
+  assert.equal(new Set(jobs.map((j) => j.externalId)).size, 237);
 });
 
 test('matches whole words in the title and the chosen places', () => {
