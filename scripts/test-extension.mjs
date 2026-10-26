@@ -278,22 +278,23 @@ async function open(url, pages) {
   return p;
 }
 
-const findAndFill = (p, ats, { profile = PROFILE, resume = RESUME, coverLetter = COVER } = {}) =>
+// The runner passes the approved job's company and whether its posting is in the U.S.; these fixtures are.
+const findAndFill = (p, ats, { profile = PROFILE, resume = RESUME, coverLetter = COVER, company = "Acme Example", usPosting = true } = {}) =>
   p.evaluate(
-    async ([ats, profile, resume, coverLetter]) => {
+    async ([ats, profile, resume, coverLetter, company, usPosting]) => {
       const ap = globalThis.__applypilot;
       const form = await ap.findForm({ ats, timeoutMs: 5000 });
-      const filled = await ap.fill({ profile, resume, coverLetter, ats });
+      const filled = await ap.fill({ profile, resume, coverLetter, ats, company, usPosting });
       return { form, filled };
     },
-    [ats, profile, resume, coverLetter],
+    [ats, profile, resume, coverLetter, company, usPosting],
   );
 const auditPage = (p, j, settings = {}) => p.evaluate(([j, settings]) => globalThis.__applypilot.audit({ job: j, settings }), [j, settings]);
 
-async function prepare(ats, slots = {}, { settings = {}, jobExtra = {}, pages = {}, html, profile = PROFILE } = {}) {
+async function prepare(ats, slots = {}, { settings = {}, jobExtra = {}, pages = {}, html, profile = PROFILE, fill = {} } = {}) {
   const p = await open(URLS[ats], { [URLS[ats]]: html ?? (await page(ats, slots)), ...pages });
   try {
-    const { form, filled } = await findAndFill(p, ats, { profile });
+    const { form, filled } = await findAndFill(p, ats, { profile, ...fill });
     const audit = await auditPage(p, job(ats, { profile, ...jobExtra }), settings);
     return { page: p, form, filled, audit };
   } catch (e) {
@@ -1468,6 +1469,277 @@ test("dashboard hook: a hello sent before the bridge loaded doesn't turn a conne
 });
 
 // ---- runner ---------------------------------------------------------------------------------------
+
+// ---- step 3, third round: answers only for what you approved, and every click of yours seen ----------
+
+const selectQ = (id, q) =>
+  field(id, `${q}${REQ}`, `<select id="${id}" name="${id}" required><option value="">Select...</option><option value="1">Yes</option><option value="0">No</option></select>`);
+const pairQ = (id, q) =>
+  `<div class="field-entry" id="${id}"><label>${q}*</label><div class="yesno"><button type="button" aria-pressed="false" id="${id}-0">Yes</button><button type="button" aria-pressed="false" id="${id}-1">No</button></div></div>`;
+// Which option is chosen on any of the four layouts: 0 for Yes, 1 for No, -1 for none.
+const chosen = (p, id) =>
+  p.evaluate((id) => {
+    const s = document.getElementById(id);
+    if (s?.tagName === "SELECT") return s.value === "" ? -1 : s.value === "1" ? 0 : 1;
+    return [0, 1].findIndex((i) => {
+      const x = document.getElementById(`${id}-${i}`);
+      return x.tagName === "BUTTON" ? x.getAttribute("aria-pressed") === "true" : x.checked;
+    });
+  }, id);
+const LAYOUTS = [
+  ["greenhouse", reqRadios],
+  ["lever", leverRadios],
+  ["greenhouse", selectQ],
+  ["ashby", pairQ],
+];
+
+test("a question about needing authorization, or about a visa status, is never answered from 'authorized' on any layout", async () => {
+  const asks = {
+    req: "Do you require work authorization to work in the United States?",
+    need: "Will you need employment authorization to work in the US?",
+    isreq: "Is work authorization required?",
+    opt: "Are you authorized to work in the US on OPT?",
+    h1b: "Are you currently authorized to work in the US on an H-1B?",
+    two: "Do you require sponsorship to work in the US, or are you authorized to work without sponsorship?",
+  };
+  const plain = "Are you legally authorized to work in the United States? (Yes/No)";
+  await Promise.all(
+    LAYOUTS.map(([ats, wrap]) =>
+      using(prepare(ats, { fields: Object.entries(asks).map(([k, q]) => wrap(`q_${k}`, q)).join("") + wrap("q_plain", plain) }), async ({ page: p, audit }) => {
+        for (const [k, q] of Object.entries(asks)) assert.equal(await chosen(p, `q_${k}`), -1, `${ats} ${wrap.name}: ${q}`);
+        assert.equal(await chosen(p, "q_plain"), 0, `${ats} ${wrap.name}: ${plain}`);
+        const asked = audit.blockers.filter((b) => b.code === "unanswered_required").map((b) => b.text);
+        for (const q of Object.values(asks)) assert.ok(asked.some((t) => t.includes(q.slice(0, 40))), `${ats} ${wrap.name}: ${q} is not among the blockers`);
+        assert.equal((await SUBMITTED(p, audit.fingerprint)).submits, 0);
+      }),
+    ),
+  );
+});
+
+test("on a posting outside the U.S., a question that names no country waits for you; one about the U.S. is still answered", async () => {
+  const fields = [
+    ["sp", "Will you now or in the future require sponsorship for employment visa status?"],
+    ["au", "Are you legally authorized to work for any employer?"],
+    ["us", "Do you require us to sponsor your visa?"],
+    ["named", "Are you legally authorized to work in the United States?"],
+  ];
+  const html = fields.map(([k, q]) => leverRadios(`q_${k}`, q)).join("");
+  await using(prepare("lever", { fields: html }, { fill: { usPosting: false } }), async ({ page: p, audit }) => {
+    for (const k of ["sp", "au", "us"]) assert.equal(await chosen(p, `q_${k}`), -1, k);
+    assert.equal(await chosen(p, "q_named"), 0);
+    assert.equal(audit.blockers.filter((b) => b.code === "unanswered_required").length, 3, JSON.stringify(audit.blockers));
+  });
+  await using(prepare("lever", { fields: html }, { fill: { usPosting: true } }), async ({ page: p, audit }) => {
+    assert.deepEqual(await Promise.all(fields.map(([k]) => chosen(p, `q_${k}`))), [1, 0, 1, 0]);
+    assert.deepEqual(codes(audit), []);
+  });
+});
+
+test("common sponsorship wordings and the company's own name are answered; your flags decide", () =>
+  using(
+    prepare(
+      "greenhouse",
+      {
+        fields: [
+          ["order", "Will you require visa sponsorship in order to work in the US?", 1],
+          ["requiring", "Are you authorized to work in the U.S. without requiring sponsorship?", 0],
+          ["company", "Will you now or in the future require Acme to sponsor your visa?", 1],
+          ["continue", "Do you require sponsorship to continue working in the US?", 1],
+          ["point", "Will you now or at any point in the future require sponsorship?", 1],
+          ["either", "Will you require sponsorship to work in the US either now or in the future?", 1],
+          ["from", "Will you now or in the future require visa sponsorship from an employer?", 1],
+          ["needing", "Would you be able to work in the US without needing sponsorship?", 0],
+          ["for", "Are you authorized to work in the United States for Acme?", 0],
+          ["commence", "Will you require sponsorship to commence employment?", 1],
+        ]
+          .map(([k, q]) => reqRadios(`q_${k}`, q))
+          .join(""),
+      },
+      { fill: { company: "Acme Inc." } },
+    ),
+    async ({ page: p, audit }) => {
+      const want = { order: 1, requiring: 0, company: 1, continue: 1, point: 1, either: 1, from: 1, needing: 0, for: 0, commence: 1 };
+      for (const [k, i] of Object.entries(want)) assert.equal(await chosen(p, `q_${k}`), i, k);
+      assert.deepEqual(codes(audit), []);
+    },
+  ));
+
+test("radio options whose wording sits beside them, not in a label, never change how the question reads", async () => {
+  const opts = (yes, no) => `<div class="field"><label>Will you now or in the future require visa sponsorship?${REQ}</label>
+    <div><input type="radio" name="sp" value="Yes" id="sp-0" required><span>${yes}</span></div>
+    <div><input type="radio" name="sp" value="No" id="sp-1" required><span>${no}</span></div></div>`;
+  await using(prepare("greenhouse", { fields: opts("Yes, I will require sponsorship", "No, I do not require sponsorship") }), async ({ page: p, audit }) => {
+    assert.equal(await chosen(p, "sp"), -1);
+    assert.ok(codes(audit).includes("unanswered_required"), JSON.stringify(codes(audit)));
+    assert.equal((await SUBMITTED(p, audit.fingerprint)).submits, 0);
+  });
+  await using(prepare("greenhouse", { fields: opts("Yes", "No") }), async ({ page: p, audit }) => {
+    assert.equal(await chosen(p, "sp"), 1);
+    assert.deepEqual(codes(audit), []);
+  });
+});
+
+test("a supervisor's, a manager's or an alternate contact's name, email and phone are never filled with yours", async () => {
+  const group = (head) => `<section><h3>${head}</h3>
+    ${field("o_name", "Name*", `<input id="o_name" name="question_3101" type="text" required>`)}
+    ${field("o_email", "Email*", `<input id="o_email" name="question_3102" type="email" required>`)}
+    ${field("o_phone", "Phone*", `<input id="o_phone" name="question_3103" type="tel" required>`)}</section>`;
+  await Promise.all(
+    ["Supervisor", "Most recent supervisor", "Current manager", "Hiring manager you spoke with", "Alternate contact"].map((head) =>
+      using(prepare("greenhouse", { fields: group(head) }), async ({ page: p, audit }) => {
+        const v = await values(p);
+        assert.deepEqual([v.o_name, v.o_email, v.o_phone], ["", "", ""], head);
+        assert.equal(audit.blockers.filter((b) => b.code === "unanswered_required").length, 3, head);
+        assert.equal(v.email, PROFILE.email, `${head}: your own email is still filled`);
+      }),
+    ),
+  );
+  // A job title over your own details is not someone else's.
+  await using(prepare("greenhouse", { fields: group("IT Support Manager application") }), async ({ page: p }) => {
+    const v = await values(p);
+    assert.deepEqual([v.o_email, v.o_phone], [PROFILE.email, PROFILE.phone]);
+  });
+});
+
+test("a profile field beside a required radio or checkbox question is never taken as its answer", async () => {
+  const cases = {
+    radio: `<div class="field"><label>Are you willing to work on-site in Atlanta three days a week?${REQ}</label>
+      <label><input type="radio" name="onsite" id="on_y" value="Yes">Yes</label><label><input type="radio" name="onsite" id="on_n" value="No">No</label>
+      <label for="li">LinkedIn URL</label><input type="text" id="li" name="li"></div>`,
+    checks: `<div class="field"><label>Which shifts can you work?${REQ}</label>
+      <label><input type="checkbox" name="shift[]" value="d" id="sh1">Days</label><label><input type="checkbox" name="shift[]" value="n" id="sh2">Nights</label>
+      <label for="li">LinkedIn</label><input type="text" id="li" name="li"></div>`,
+  };
+  await Promise.all(
+    Object.entries(cases).map(([name, fields]) =>
+      using(prepare("greenhouse", { fields }), async ({ page: p, audit }) => {
+        assert.equal((await values(p)).li, PROFILE.linkedIn, name);
+        assert.ok(codes(audit).includes("unanswered_required"), `${name}: ${JSON.stringify(codes(audit))}`);
+        assert.equal((await SUBMITTED(p, audit.fingerprint)).submits, 0, name);
+      }),
+    ),
+  );
+  // An "Other" box you typed in still answers its question.
+  await using(
+    prepare("greenhouse", {
+      fields: `<fieldset class="field"><legend>How did you hear about us?*</legend><label><input type="checkbox" name="hear[]" value="li" id="h1">LinkedIn</label><label for="hear_other">Other (please specify)</label><input type="text" id="hear_other" name="hear_other"></fieldset>`,
+    }),
+    async ({ page: p, audit }) => {
+      assert.ok(codes(audit).includes("unanswered_required"));
+      await p.fill("#hear_other", "A friend at a meetup");
+      const again = await auditPage(p, job("greenhouse"));
+      assert.ok(!codes(again).includes("unanswered_required"), JSON.stringify(codes(again)));
+    },
+  );
+});
+
+test("a location question that isn't your own location (an office, a city of birth) is never filled with your city", () =>
+  using(
+    prepare("greenhouse", {
+      fields:
+        combo(["office", "Which office location are you applying for?", ["Grayson, Georgia, United States", "Austin, Texas, United States"], "city"]) +
+        combo(["birth_city", "City of birth", ["Grayson, Georgia, United States", "Lagos, Nigeria"], "city"]),
+      script: `<script src="/assets/combobox.js"></script>`,
+    }),
+    async ({ page: p, filled, audit }) => {
+      assert.equal(await p.evaluate(() => document.querySelectorAll(".select__single-value").length), 0);
+      assert.ok(!filled.filled.some((x) => /office|birth/i.test(x.label)), JSON.stringify(filled.filled));
+      assert.equal(audit.blockers.filter((b) => b.code === "unanswered_required").length, 2, JSON.stringify(audit.blockers));
+    },
+  ));
+
+test("a watched Ashby tab: a Submit click that didn't send, then the Overview drawn after the route change, is never read as sent", () =>
+  using(
+    prepare("ashby", { fields: `<div class="field-entry"><label for="q_why">Why do you want to work here?<span class="req">*</span></label><textarea id="q_why" name="q_why" required></textarea></div>` }),
+    async ({ page: p, audit }) => {
+      assert.ok(codes(audit).includes("unanswered_required"));
+      await p.evaluate(() => globalThis.__applypilot.watchForConfirmation({ ats: "ashby" }));
+      // The empty required answer stops the browser from sending it.
+      await p.click("#submit");
+      assert.equal(await p.evaluate(() => window.__submits), 0);
+      await p.waitForTimeout(1200);
+      await p.evaluate(() => {
+        history.pushState({}, "", location.pathname.replace(/\/application$/, ""));
+        const app = document.getElementById("app");
+        app.innerHTML = `<h1>Help Desk Technician</h1><nav><a href="#">Overview</a> <a href="#">Application</a></nav><div class="spinner">Loading…</div>`;
+        setTimeout(() => {
+          app.innerHTML = `<h1>Help Desk Technician</h1><nav><a href="#">Overview</a> <a href="#">Application</a></nav><section><h2>About the role</h2><p>You will support 300 staff.</p><p>Every application received will be reviewed by our hiring team within two weeks.</p></section>`;
+        }, 600);
+      });
+      await p.waitForTimeout(3500);
+      const sent = await p.evaluate(() => window.__sent.map((m) => m.kind));
+      assert.ok(sent.includes("peter_click"), JSON.stringify(sent));
+      assert.ok(!sent.includes("confirmed"), JSON.stringify(sent));
+    },
+  ));
+
+// A shadow root the banner opens, kept so a test can read it.
+const keepShadows = (p) =>
+  p.evaluate(() => {
+    const attach = Element.prototype.attachShadow;
+    window.__shadows = [];
+    Element.prototype.attachShadow = function (o) {
+      const r = attach.call(this, o);
+      window.__shadows.push(r);
+      return r;
+    };
+  });
+
+test("supervised: your click on Submit after the form re-renders still counts, and matches when nothing you approved changed", () =>
+  using(prepare("ashby"), async ({ page: p, audit }) => {
+    assert.deepEqual(codes(audit), []);
+    assert.equal((await p.evaluate((fp) => globalThis.__applypilot.armSupervised(fp), audit.fingerprint)).armed, true);
+    // The site mounts the form again: every element is new except the attached resume, which it keeps.
+    await p.evaluate(() => {
+      const old = document.querySelector("form");
+      const neu = old.cloneNode(true);
+      neu.querySelector("#_systemfield_resume").replaceWith(old.querySelector("#_systemfield_resume"));
+      old.replaceWith(neu);
+    });
+    await p.click("#submit");
+    const ev = await p.evaluate(() => window.__sent.find((m) => m.kind === "peter_click"));
+    assert.ok(ev, "the click was recorded");
+    assert.equal(ev.matches, true);
+    const state = await p.evaluate(() => globalThis.__applypilot.clickState());
+    assert.deepEqual([state.clicked, state.matches], [true, true]);
+  }));
+
+test("your own Submit click before ApplyPilot highlights or presses anything is recorded, and nothing is pressed after it", () =>
+  using(prepare("greenhouse"), async ({ page: p, audit }) => {
+    assert.deepEqual(codes(audit), []);
+    await p.click("#submit");
+    const ev = await p.evaluate(() => window.__sent.find((m) => m.kind === "peter_click"));
+    assert.ok(ev, "the click was recorded");
+    assert.equal(ev.matches, false, "ApplyPilot hadn't said everything matched");
+    assert.deepEqual(await p.evaluate(() => globalThis.__applypilot.clickState().clicked), true);
+    const again = await auditPage(p, job("greenhouse"));
+    assert.ok(codes(again).includes("you_clicked"), JSON.stringify(codes(again)));
+    const out = await press(p, audit.fingerprint);
+    assert.equal(out.r.clicked, false);
+    assert.equal(out.submits, 1, "only your own click");
+    assert.equal((await p.evaluate((fp) => globalThis.__applypilot.armSupervised(fp), audit.fingerprint)).armed, false);
+  }));
+
+test("supervised: when ApplyPilot stops waiting, the green outline and 'everything matches' banner go", () =>
+  using(prepare("greenhouse"), async ({ page: p, audit }) => {
+    await keepShadows(p);
+    assert.equal((await p.evaluate((fp) => globalThis.__applypilot.armSupervised(fp), audit.fingerprint)).armed, true);
+    assert.match(await p.evaluate(() => document.getElementById("submit").style.outline), /solid/);
+    const r = await p.evaluate(() => globalThis.__applypilot.disarm([{ code: "stopped", text: "Stopped before you submitted." }]));
+    assert.deepEqual(r, { disarmed: true });
+    const s = await p.evaluate(() => {
+      const root = window.__shadows[window.__shadows.length - 1];
+      return { outline: document.getElementById("submit").style.outline, text: root.textContent, banners: document.querySelectorAll("#applypilot-banner").length };
+    });
+    assert.equal(s.outline, "");
+    assert.equal(s.banners, 1);
+    assert.match(s.text, /no longer an approved send/);
+    assert.match(s.text, /Stopped before you submitted/);
+    assert.doesNotMatch(s.text, /Everything matches/);
+    // A click after that is yours alone, never one on the form ApplyPilot vouched for.
+    await p.click("#submit");
+    assert.equal(await p.evaluate(() => window.__sent.find((m) => m.kind === "peter_click")?.matches), false);
+  }));
 
 const CONCURRENCY = 6;
 const TIMEOUT_MS = 90000;

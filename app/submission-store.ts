@@ -579,8 +579,9 @@ function transition(db: SqlDatabase, owner: string, r: SubmissionResult, nowIso:
     // confirmed submission in a watched tab, whatever happened to the claim.
     const from = `((state IN ('claimed','check','not_sent') AND attempt_id = ?) OR
       (? = 'you' AND state IN ('claimed','needs_you','revoked','expired','check','not_sent')))`;
-    // Calibration: your click on the form ApplyPilot checked, confirmed straight from the supervised claim.
-    const calibrated = r.clickedBy === "you" && r.fingerprintMatched !== false && r.attemptId
+    // Calibration: your click on the form ApplyPilot checked, confirmed straight from the supervised claim. Only a
+    // click the page saw match counts; one it couldn't compare (null) never does.
+    const calibrated = r.clickedBy === "you" && r.fingerprintMatched === true && r.attemptId
       ? [db.prepare(`INSERT OR IGNORE INTO submission_events (id, owner_email, submission_id, at, actor, event, detail_json)
           SELECT ?, owner_email, id, ?, 'server', 'calibrated', ? FROM submissions
           WHERE ${target} AND state = 'claimed' AND attempt_id = ? AND claim_mode = 'supervised'`)
@@ -623,10 +624,12 @@ function transition(db: SqlDatabase, owner: string, r: SubmissionResult, nowIso:
           r.extensionVersion, nowIso, ...keys, ...fromArgs);
     const fromClaim = update("state = 'claimed' AND attempt_id = ?", r.attemptId);
     if (r.clickedBy !== "you") return [fromClaim];
-    // You pressed Submit yourself in a needs-you tab. That may have sent it, so the job waits for your answer instead
-    // of being offered for approval again, and a newer approval of it is withdrawn.
+    // You pressed Submit yourself: in a needs-you tab, before ApplyPilot claimed it, or again after you said it didn't
+    // go through. That may have sent it, so the job waits for your answer instead of being offered for approval
+    // again, and a newer approval of it is withdrawn.
+    const yours = "state IN ('approved','needs_you','not_sent')";
     const others = `owner_email = ? AND job_key = ? AND id != ? AND state = 'approved'
-      AND EXISTS (SELECT 1 FROM submissions WHERE ${target} AND state = 'needs_you')`;
+      AND EXISTS (SELECT 1 FROM submissions WHERE ${target} AND ${yours})`;
     const othersArgs = [owner, r.jobKey, r.approvalId, ...keys];
     return [
       fromClaim,
@@ -635,7 +638,7 @@ function transition(db: SqlDatabase, owner: string, r: SubmissionResult, nowIso:
         FROM submissions WHERE ${others}`).bind(nowIso, ...othersArgs),
       db.prepare(`UPDATE submissions SET state = 'revoked', reason = 'You clicked Submit in the open tab', updated_at = ? WHERE ${others}`)
         .bind(nowIso, ...othersArgs),
-      update(`state = 'needs_you' AND NOT EXISTS (SELECT 1 FROM submissions x WHERE x.owner_email = ? AND x.job_key = ? AND x.id != ?
+      update(`${yours} AND NOT EXISTS (SELECT 1 FROM submissions x WHERE x.owner_email = ? AND x.job_key = ? AND x.id != ?
         AND x.state IN ('approved','claimed','check'))`, owner, r.jobKey, r.approvalId),
     ];
   }
@@ -716,29 +719,27 @@ export async function cancelSubmissions(db: SqlDatabase, owner: string, ids: rea
       AND id IN (${marks(list.length)})`).bind(owner, ...list).all<Found>()).results;
   }
   const claimed = found.filter((row) => row.state === "claimed");
-  const tooLate = claimed.map((row) => row.id);
   const pending = found.filter((row) => row.state === "approved").map((row) => row.id);
   // A claim can't be taken back under the runner, but if the runner gives it back, it comes back cancelled.
   const cancelAsks = claimed.filter((row) => row.attempt_id).map((row) =>
     db.prepare(`INSERT OR IGNORE INTO submission_events (id, owner_email, submission_id, at, actor, event, detail_json)
       SELECT ?, owner_email, id, ?, 'peter', 'cancel_requested', ? FROM submissions WHERE id = ? AND owner_email = ? AND state = 'claimed' AND attempt_id = ?`)
       .bind(cancelEventId(row.id, String(row.attempt_id)), nowIso, JSON.stringify({ attemptId: row.attempt_id }), row.id, owner, row.attempt_id));
-  if (!pending.length) {
-    if (cancelAsks.length) await db.batch(cancelAsks);
-    return { revoked: [] as string[], tooLate };
-  }
-  // A pending row claimed between the read and this batch gets the same cancel marker, so a claim given back
-  // comes back cancelled. The markers go last so the revoke results keep their places.
-  const lateAsks = pending.map((id) =>
+  // Every row read, whatever happened to it since: a pending row claimed in the meantime gets the same cancel
+  // marker, and a claim given back in the meantime (approved again) is revoked like the others. The markers go last
+  // so the revoke results keep their places.
+  const asked = [...pending, ...claimed.map((row) => row.id)];
+  const revokes = asked.flatMap((id) => revoke(db, owner, id, "Cancelled by you", "peter", nowIso));
+  const lateAsks = asked.map((id) =>
     db.prepare(`INSERT OR IGNORE INTO submission_events (id, owner_email, submission_id, at, actor, event, detail_json)
       SELECT id || ':cancel:' || attempt_id, owner_email, id, ?, 'peter', 'cancel_requested', json_object('attemptId', attempt_id)
       FROM submissions WHERE id = ? AND owner_email = ? AND state = 'claimed' AND attempt_id IS NOT NULL`)
       .bind(nowIso, id, owner));
-  const revokes = pending.flatMap((id) => revoke(db, owner, id, "Cancelled by you", "peter", nowIso));
+  if (!asked.length) return { revoked: [] as string[], tooLate: [] as string[] };
   const results = await db.batch([...cancelAsks, ...revokes, ...lateAsks]);
-  const revoked = pending.filter((_, index) => results[cancelAsks.length + index * 2 + 1]?.meta.changes === 1);
+  const revoked = asked.filter((_, index) => results[cancelAsks.length + index * 2 + 1]?.meta.changes === 1);
   // A row that moved on between the read and the write was claimed (or expired) in the meantime.
-  tooLate.push(...pending.filter((id) => !revoked.includes(id)));
+  const tooLate = asked.filter((id) => !revoked.includes(id));
   return { revoked, tooLate };
 }
 

@@ -55,9 +55,14 @@ async function claim(payload) {
   let frames = await readyFrames();
   if (!frames.length && !openedDashboard) {
     openedDashboard = true;
+    const id = (await currentWindowId().catch(() => null)) ?? windowId;
     try {
-      await chrome.tabs.create({ url: DASHBOARD_URL, active: false, ...(typeof windowId === "number" ? { windowId } : {}) });
-    } catch {}
+      await chrome.tabs.create({ url: DASHBOARD_URL, active: false, ...(typeof id === "number" ? { windowId: id } : {}) });
+    } catch {
+      try {
+        await chrome.tabs.create({ url: DASHBOARD_URL, active: false });
+      } catch {}
+    }
     frames = await waitForFrames(DASH_WAIT_MS);
   }
   let last = { ok: false, reason: "no_dashboard" };
@@ -91,6 +96,9 @@ async function notify(type, payload) {
   }
 }
 
+// The window this page is in now; you may have moved it since it opened.
+const currentWindowId = async () => (await chrome.windows.getCurrent()).id;
+
 const deps = {
   storage: { get: (k) => local.get(k), set: (o) => local.set(o), remove: (k) => local.remove(k) },
   tabs: {
@@ -102,6 +110,7 @@ const deps = {
     onRemoved: chrome.tabs.onRemoved,
   },
   windows: { update: (id, p) => chrome.windows.update(id, p) },
+  currentWindowId,
   scripting: { executeScript: (o) => chrome.scripting.executeScript(o) },
   permissions: { contains: (p) => chrome.permissions.contains(p) },
   bridge: { claim, notify },
@@ -258,6 +267,11 @@ async function main() {
 
   runner.subscribe(render);
   await renderBridge();
+  // When Chrome has just started, background.js first forgets the tab ids saved before; recovering before that
+  // finishes would have its saves undone.
+  try {
+    await Promise.race([chrome.runtime.sendMessage({ type: "AP_RUNNER_START" }), new Promise((r) => setTimeout(r, 5000))]);
+  } catch {}
   await runner.recover();
   await runner.start();
 }

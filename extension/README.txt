@@ -26,9 +26,9 @@ What it never does
 - It submits only jobs you approved, once each, and only after ApplyPilot
   confirms the approval right before Submit.
 - It stops and leaves the tab open, already filled, for CAPTCHAs, sign-ins
-  or new accounts, passwords, legal certifications, demographic and other
-  sensitive questions, multi-page forms, and any required question it has
-  no approved answer for.
+  or new accounts, passwords, legal certifications, required demographic
+  and other sensitive questions, multi-page forms, and any required
+  question it has no approved answer for.
 - It never answers a demographic question and never solves a CAPTCHA.
   Optional demographic and other sensitive questions are left blank and
   never touched, and a page whose only CAPTCHA is an invisible background

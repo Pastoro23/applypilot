@@ -17,6 +17,9 @@ export type BatchJob = {
   approvalId: string; applicationId: string; jobKey: string; ats: Ats; applyUrls: string[]; company: string; role: string;
   revision: number; approvedAt: string; expiresAt: string; supersedesId: string | null;
   profile: AutofillProfile; profileHash: string; resume: BatchResume; coverLetter: string;
+  // Your work-authorization answers are about the U.S.; Chrome uses them on a question that names no country only
+  // when this is true.
+  usPosting: boolean;
 };
 export type Batch = {
   batchId: string; createdAt: string;
@@ -26,6 +29,7 @@ export type Batch = {
 };
 export type BatchApplication = {
   id: string; company: string; role: string; tailoredJson: string | null; tailoredAt: string | null; tailoredRevision: number;
+  location?: string;
 };
 export type BatchSkip = { applicationId: string; code: string; reason: string };
 
@@ -42,6 +46,51 @@ export function bytesToBase64(bytes: Uint8Array): string {
 export function resumeFilename(name: string): string {
   const base = (name ?? "").normalize("NFC").trim().replace(/[^\w]+/g, "_").replace(/^_|_$/g, "").slice(0, 120).replace(/_$/, "");
   return base ? `${base}_Resume.pdf` : "Resume.pdf";
+}
+
+const US_STATES: Record<string, string> = {
+  AL: "alabama", AK: "alaska", AZ: "arizona", AR: "arkansas", CA: "california", CO: "colorado", CT: "connecticut", DE: "delaware",
+  DC: "district of columbia", FL: "florida", GA: "georgia", HI: "hawaii", ID: "idaho", IL: "illinois", IN: "indiana", IA: "iowa",
+  KS: "kansas", KY: "kentucky", LA: "louisiana", ME: "maine", MD: "maryland", MA: "massachusetts", MI: "michigan", MN: "minnesota",
+  MS: "mississippi", MO: "missouri", MT: "montana", NE: "nebraska", NV: "nevada", NH: "new hampshire", NJ: "new jersey",
+  NM: "new mexico", NY: "new york", NC: "north carolina", ND: "north dakota", OH: "ohio", OK: "oklahoma", OR: "oregon",
+  PA: "pennsylvania", RI: "rhode island", SC: "south carolina", SD: "south dakota", TN: "tennessee", TX: "texas", UT: "utah",
+  VT: "vermont", VA: "virginia", WA: "washington", WV: "west virginia", WI: "wisconsin", WY: "wyoming",
+};
+const STATE_NAMES = new Set(Object.values(US_STATES));
+const US_COUNTRY = new Set(["united states", "united states of america", "usa", "us", "u.s.", "u.s.a.", "u.s"]);
+// Cities a posting names on their own ("New York", "Remote or San Francisco"), none of them also a city elsewhere.
+const US_CITIES = new Set([
+  "new york city", "nyc", "san francisco", "sf", "bay area", "san francisco bay area", "los angeles", "chicago", "boston", "seattle",
+  "austin", "atlanta", "denver", "dallas", "houston", "miami", "philadelphia", "phoenix", "san diego", "san jose", "nashville",
+  "minneapolis", "detroit", "pittsburgh", "raleigh", "charlotte", "salt lake city", "las vegas", "baltimore", "kansas city",
+  "indianapolis", "orlando", "tampa", "sacramento", "cincinnati", "cleveland", "palo alto", "mountain view", "menlo park",
+  "sunnyvale", "redwood city", "washington dc", "washington d.c.",
+]);
+const GENERIC = /\b(remote|hybrid|on-?site|in-?office|office|flexible|anywhere)\b/gi;
+
+// Whether a posting's location is in the U.S. only: every place it names is a U.S. state, city or "United States",
+// beside words such as Remote or Hybrid. Unknown or empty is false, so the answers wait for you.
+export function usPosting(location: string | null | undefined): boolean {
+  // " or " in lower case only, so "Portland, OR" stays one place.
+  const parts = String(location ?? "").split(/[;|/·•\n]|\s+or\s+/);
+  let us = false;
+  for (const part of parts) {
+    const segments = part
+      .replace(/[()]/g, ",")
+      .replace(/\s[-–—]\s/g, ",")
+      .split(",")
+      .map((x) => x.replace(GENERIC, " ").replace(/\s+/g, " ").trim())
+      .filter(Boolean);
+    if (!segments.length) continue;
+    const last = segments[segments.length - 1];
+    const lower = last.toLowerCase();
+    const code = last.replace(/\./g, "").match(/^([A-Z]{2})(\s+\d{5}(-\d{4})?)?$/)?.[1];
+    const named = US_COUNTRY.has(lower) || STATE_NAMES.has(lower) || (!!code && code in US_STATES);
+    if (!named && !(segments.length === 1 && US_CITIES.has(lower))) return false;
+    us = true;
+  }
+  return us;
 }
 
 export function tailoredOf(app: Pick<BatchApplication, "tailoredJson">): TailoredResume | null {
@@ -133,6 +182,7 @@ export async function buildBatch(
       profileHash: item.profileHash,
       resume: { name: pdf.name, type: "application/pdf", size: pdf.bytes.length, sha256: await sha256Hex(pdf.bytes), b64: bytesToBase64(pdf.bytes) },
       coverLetter: item.includeCoverLetter ? letter.trim().slice(0, MAX_COVER_LETTER) : "",
+      usPosting: usPosting(app.location),
     });
   }
   for (const item of input.approved.slice(MAX_BATCH)) {

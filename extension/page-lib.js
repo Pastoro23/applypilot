@@ -113,17 +113,45 @@
     }
     return null;
   };
+  const labelledBy = (x) =>
+    (x.getAttribute("aria-labelledby") || "")
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((id) => document.getElementById(id))
+      .filter(Boolean);
+  // The box each option sits in on its own ("<div><input> <span>Yes, I will require sponsorship</span></div>"), when
+  // every option of the group has one and they sit side by side.
+  const optionWrappers = (options, g) => {
+    if (options.length < 2) return [];
+    const ws = options.map((x) => {
+      let w = x;
+      while (w.parentElement && w.parentElement !== g && !options.some((o) => o !== x && w.parentElement.contains(o))) w = w.parentElement;
+      return w;
+    });
+    return ws.every((w, i) => w !== options[i] && w.parentElement === ws[0].parentElement) ? ws : [];
+  };
   const optionText = (g, options) => {
-    const optionLabels = [];
-    options.forEach((x) => optionLabels.push(...Array.from(x.labels || [])));
+    const own = [...optionWrappers(options, g)];
+    options.forEach((x) => own.push(...Array.from(x.labels || []), ...labelledBy(x)));
     const w = document.createTreeWalker(g, NodeFilter.SHOW_TEXT);
     let s = "";
     for (let n; (n = w.nextNode()); ) {
       if (n.parentElement?.closest("option,select,script,style")) continue;
-      if (optionLabels.some((l) => l.contains(n))) continue;
+      if (own.some((l) => l.contains(n))) continue;
       s += " " + n.textContent;
     }
     return s.replace(/\s+/g, " ").trim().slice(0, 240).toLowerCase();
+  };
+  // What an option itself says: its label, aria-labelledby or aria-label, or the box it sits in on its own. Never its
+  // value, which a site may set to "Yes" on "Yes, I will require sponsorship".
+  const ownOptionText = (x, group) => {
+    const named = norm([...Array.from(x.labels || []), ...labelledBy(x)].map((l) => l.textContent || "").join(" ") || x.getAttribute("aria-label"));
+    if (named) return named;
+    const i = group.indexOf(x);
+    let g = group[0]?.parentElement;
+    while (g && !group.every((o) => g.contains(o))) g = g.parentElement;
+    const box = i >= 0 && g ? optionWrappers(group, g)[i] : null;
+    return box ? norm(box.textContent) : "";
   };
   const question = (f, manual = false) => {
     let g = f.closest(manual ? MANUAL_GROUPS : BATCH_GROUPS);
@@ -141,10 +169,19 @@
     }
     return optionText(g, Array.from(g.querySelectorAll("input[type=radio],input[type=checkbox]")));
   };
-  // Answers depend on how the question is worded: "Can you work WITHOUT sponsorship?" flips the answer.
-  // Anything that isn't clearly one of the known shapes goes to the user.
+  // Answers depend on how the question is worded: "Can you work WITHOUT sponsorship?" flips the answer. So does a
+  // question that says which answer means what ("Indicate no if you will require sponsorship"), one that asks two
+  // things at once, and one that asks whether you need authorization rather than whether you have it ("Do you
+  // require work authorization?", "...on OPT?"). Anything that isn't clearly one of the known shapes goes to the user.
+  const SAYS_ANSWER = /\byes\b|\bno\b(?!( [\w-]+){0,2} sponsor)/;
+  const EITHER_OR = /,\s*or\b|\bor (are|do|does|will|would|can|could|have|has|is|am|you|i)\b/;
+  const NEEDS_AUTH =
+    /\b(needs?|needed|needing|require[sd]?|requiring|petition|support|obtain|status)\b|\b(opt|cpt|ead|stem|tn|h-? ?1-? ?b|h-? ?1|o-? ?1|e-? ?3|l-? ?1|f-? ?1|j-? ?1)\b/;
   const eligibility = (q, aQ, sQ, authorized, needsSponsor) => {
+    // "(Yes/No)" only says the question takes one of the two.
+    if (SAYS_ANSWER.test(q.replace(/\byes\s*(\/|or)\s*no\b/g, " "))) return null;
     if (sQ) {
+      if (aQ && (EITHER_OR.test(q) || /\b(indicate|whether|if)\b/.test(q))) return null;
       if (/without (\w+ ){0,3}sponsor|no (\w+ ){0,2}sponsor|not (require|need)\w* (\w+ ){0,3}sponsor/.test(q)) {
         if (needsSponsor === null) return null;
         if (!aQ) return !needsSponsor;
@@ -155,7 +192,7 @@
       if (/\b(require|need)\w*\b.*\bsponsor|\bsponsor\w*\b.*\b(require|need)/.test(q)) return needsSponsor;
       return null;
     }
-    if (/\b(not|never|unable|cannot|can't)\b|unauthori/.test(q)) return null;
+    if (/\b(not|never|unable|cannot|can't)\b|unauthori/.test(q) || NEEDS_AUTH.test(q)) return null;
     return authorized;
   };
   const empty = (f) => {
@@ -214,9 +251,8 @@
       const g = f.name
         ? Array.from(document.querySelectorAll(`input[type=radio][name="${CSS.escape(f.name)}"]`))
         : [f];
-      const o = g.find((x) =>
-        new RegExp(`^${a}$`, "i").test((x.labels?.[0]?.textContent || x.value || "").trim()),
-      );
+      const hits = g.filter((x) => new RegExp(`^${a}$`, "i").test(ownOptionText(x, g)));
+      const o = hits.length === 1 ? hits[0] : null;
       if (o) {
         o.click();
         mark(o, "#2f7df6");
@@ -523,7 +559,12 @@
     at this time full part basis on such as e g eg h1b h1 tn opt cpt ead stem o1 e3 l1 f1 j1 petition support obtain accept
     position role job please confirm indicate whether if that`.split(/\s+/),
   );
-  function usWorkQuestion(q, aQ) {
+  // Common in sponsorship questions only ("in order to", "at any point", "from an employer"). "Permanent" and "hold"
+  // stay out of authorization questions: "authorized on a permanent basis" is not what your flag says.
+  const SPONSOR_WORDS = new Set(
+    `order requiring needing from either point continue continuing sponsoring maintain hold permanent employ commence`.split(/\s+/),
+  );
+  function usWorkQuestion(q, aQ, sQ) {
     const words = norm(
       String(q)
         .toLowerCase()
@@ -531,8 +572,26 @@
         .replace(/[^a-z0-9]+/g, " ")
         .replace(/\b([a-z]) ?(\d)([a-z]?)\b/g, "$1$2$3"),
     ).split(" ");
-    if (!words[0] || !words.every((w) => US_WORK_WORDS.has(w) || /^\d+$/.test(w))) return false;
+    if (!words[0] || !words.every((w) => US_WORK_WORDS.has(w) || (sQ && SPONSOR_WORDS.has(w)) || /^\d+$/.test(w))) return false;
     return !aQ || words.some((w) => ["work", "working", "employment", "employed"].includes(w));
+  }
+  // The question names the U.S. itself; "us" as in "require us to sponsor you" does not.
+  const namesUS = (q) =>
+    q.search(US_NAME) >= 0 ||
+    /\b(in|within|inside|throughout|across) (the )?us\b|\bus[- ](based|work|employment|employers?|persons?|citizens?|compan(y|ies)|visas?|immigration|government)\b/.test(q);
+  const COMPANY_SUFFIX = new Set(["inc", "incorporated", "llc", "ltd", "limited", "corp", "corporation", "co", "company", "plc", "gmbh", "group", "holdings"]);
+  // The approved job's company, written as "company" so "require Acme to sponsor your visa" reads like any other.
+  function withoutCompany(q, company) {
+    const words = String(company ?? "").toLowerCase().match(/[a-z0-9]+/g) || [];
+    const names = [words];
+    if (words.length > 1 && COMPANY_SUFFIX.has(words[words.length - 1])) names.push(words.slice(0, -1));
+    let t = String(q);
+    for (const w of names) {
+      const name = w.join(" ");
+      if (name.length < 2 || (w.length === 1 && (US_WORK_WORDS.has(name) || SPONSOR_WORDS.has(name)))) continue;
+      t = t.replace(new RegExp(`(^|[^a-z0-9])${w.join("[^a-z0-9]+")}(?![a-z0-9])`, "g"), "$1company");
+    }
+    return t;
   }
   // Batch mode ticks only a box that says, in full, that this is your current job. "You may contact my current
   // employer" or "I am currently subject to a non-compete" are questions for you.
@@ -542,8 +601,12 @@
   // The heading over a group of short fields that belong to someone else ("Professional reference", "Emergency
   // contact"). Narrower than NOT_SELF, since a job title such as "IT Support Manager" can head a form.
   const OTHER_PERSON =
-    /\b(refer(ence|ee|ral|rer)s?|referred|emergency|next of kin|spouse|parent|guardian|relatives?|friends?|(manager|supervisor|employer)('s)? (contact|details|information|info))\b/i;
-  const LOCATION = /\blocation\b|\bcity\b/i;
+    /\b(refer(ence|ee|ral|rer)s?|referred|emergency|next of kin|spouse|parent|guardian|relatives?|friends?|(manager|supervisor|employer)('s)? (contact|details|information|info)|(alternate|alternative|secondary|additional|backup) contact( person)?)\b/i;
+  // A heading that is itself someone's role ("Supervisor", "Current manager", "Hiring manager you spoke with"). Read
+  // from the start of each heading, so a job title such as "IT Support Manager" doesn't count.
+  const OTHER_ROLE = /^(your |most recent |current |former |previous |direct |immediate )?(supervisor|manager|hiring manager|reporting manager)s?\b/i;
+  // Your own location field, by its short name: not "Which office location are you applying for?".
+  const LOCATION_FIELD = [["location", /^(current |your |home )?location( \(city\)| city)?$|^(current |home )?city$|^city,? (and )?state$/]];
   const PLACEHOLDER = /^(select|choose|pick|search|start typing|type to search|please select)\b/i;
   const TEXTLIKE = ["text", "email", "tel", "url", "search", "textarea"];
   // Profile fields are matched on a whole short name ("Email", "Mobile phone", name="first_name"), never on a
@@ -588,6 +651,7 @@
 
   const COPY = {
     already_clicked: "ApplyPilot already pressed Submit on this page.",
+    you_clicked: "You pressed Submit on this page yourself.",
     form_not_found: "Couldn't find the application form.",
     ambiguous_form: "Found more than one application form.",
     closed: "The posting looks closed.",
@@ -643,8 +707,9 @@
     fillFlagged: [],
     watching: false,
     armed: null,
-    peterListener: false,
-    watchListener: false,
+    clickListener: false,
+    peterClick: null,
+    clickPath: "",
   };
   const api = {
     version: VERSION,
@@ -655,6 +720,8 @@
     audit,
     pressSubmit,
     armSupervised,
+    clickState,
+    disarm,
     readOutcome,
     watchForConfirmation,
     bannerNeedsYou,
@@ -776,7 +843,7 @@
   }
   // Whose details a field asks for, read from the legend or heading of each box it sits in inside the form: the
   // heading nearest before it at each level, so a flat list under "Emergency contact" counts too.
-  function ownerContext(f, root) {
+  function ownerParts(f, root) {
     const heads = "legend,h1,h2,h3,h4,h5,h6,[role=heading]";
     const parts = [textOf(groupLabelEl(f))];
     for (let child = f, e = f.parentElement; e && root.contains(e); child = e, e = e.parentElement) {
@@ -793,9 +860,13 @@
       }
       if (e === root) break;
     }
-    return parts.join(" ");
+    return parts.map(norm).filter(Boolean);
   }
-  const forSomeoneElse = (f, root) => NOT_SELF.test(labelTexts(f).join(" ")) || OTHER_PERSON.test(ownerContext(f, root));
+  const forSomeoneElse = (f, root) => {
+    if (NOT_SELF.test(labelTexts(f).join(" "))) return true;
+    const parts = ownerParts(f, root);
+    return OTHER_PERSON.test(parts.join(" ")) || parts.some((p) => OTHER_ROLE.test(p));
+  };
   // What a field is called, without placeholder hints such as "Add a cover letter or anything else".
   const nameTexts = (f) => [...labelEls(f).map((l) => textOf(l)), f.getAttribute("aria-label"), f.getAttribute("name"), f.id].filter(Boolean).join(" ");
   // Short names only: label text, aria-label and placeholder as written; name, id and autocomplete as words
@@ -933,8 +1004,10 @@
     return boxes.some(isRequired) ? [f] : boxes;
   }
   // The question a set of options answers, also where no fieldset or group element marks it: the nearest box that
-  // holds all the options and, besides them, at most one optional text box (an "Other" or "self-describe" answer),
-  // with the label written before the options. Its star or required mark makes the whole question required.
+  // holds all the options and, besides them, at most one optional text box, with the label written before the
+  // options. Its star or required mark makes the whole question required. The text box answers the question only
+  // when it says it is the "Other" or "self-describe" answer; a profile field such as LinkedIn never does.
+  const OTHER_ANSWER = /\bother\b|please (specify|describe|explain)|self[- ]?describe/;
   function optionsQuestion(els, root) {
     let box = els[0].parentElement;
     while (box && box !== root && root.contains(box) && !els.every((x) => box.contains(x))) box = box.parentElement;
@@ -945,7 +1018,9 @@
       if (!label) continue;
       const required =
         box.getAttribute("aria-required") === "true" || STAR.test(textOf(label)) || label.matches(REQUIRED_MARK) || !!label.querySelector(REQUIRED_MARK);
-      return { box, label, companion: rest[0] || null, required };
+      const extra = rest[0];
+      const companion = extra && !profileField(extra) && fieldNames(extra).some((x) => OTHER_ANSWER.test(x)) ? extra : null;
+      return { box, label, companion, required };
     }
     return null;
   }
@@ -1032,6 +1107,8 @@
   }
   const alreadyClicked = () =>
     !!(api.clicked || document.documentElement.dataset.applypilotSubmitted || document.documentElement.dataset.applypilotPeterClicked);
+  // Which click it was: ApplyPilot's own, or only yours.
+  const clickedCode = () => (api.clicked || document.documentElement.dataset.applypilotSubmitted ? "already_clicked" : "you_clicked");
 
   function waitFor(test, timeoutMs, everyMs = 200) {
     return new Promise((resolve) => {
@@ -1118,6 +1195,7 @@
     if (res?.root) {
       state.root = res.root;
       sawRoot();
+      listenForClicks();
       return { ok: true, reason: "", text: "", rootPath: cssPath(res.root), inIframe, multiStep: multiStep(res.root) };
     }
     const framed = Array.from(document.querySelectorAll("iframe")).some((f) =>
@@ -1411,7 +1489,7 @@
     return fixed;
   }
 
-  async function fill({ profile, resume, coverLetter = "", ats } = {}) {
+  async function fill({ profile, resume, coverLetter = "", ats, company = "", usPosting = false } = {}) {
     const out = { filled: [], blockers: [], resumeInputPath: "" };
     state.fillFlagged = [];
     const block = (code, label, el) => {
@@ -1419,7 +1497,7 @@
       if (el) state.fillFlagged.push(el);
     };
     if (alreadyClicked()) {
-      block("already_clicked");
+      block(clickedCode());
       return out;
     }
     const adapter = adapterFor(ats);
@@ -1459,10 +1537,13 @@
     // 3-7. Text fields, native selects and radios, matched on each field's own label only.
     const authorized = typeof p.workAuthorized === "boolean" ? p.workAuthorized : null;
     const needsSponsor = typeof p.requiresSponsorship === "boolean" ? p.requiresSponsorship : null;
-    const answerFor = (q) => {
+    // Your flags are about the U.S.: a question that names no country is answered only for a U.S. posting.
+    const answerFor = (raw) => {
+      const q = withoutCompany(String(raw ?? "").toLowerCase().replace(/\((required|optional)\)/g, " "), company);
       const aQ = AUTH_Q.test(q),
         sQ = SPON_Q.test(q);
-      if ((!aQ && !sQ) || !usWorkQuestion(q, aQ)) return null;
+      if ((!aQ && !sQ) || !usWorkQuestion(q, aQ, sQ)) return null;
+      if (!usPosting && !namesUS(q)) return null;
       return eligibility(q, aQ, sQ, authorized, needsSponsor);
     };
     const skills = (Array.isArray(p.skills) ? p.skills : String(p.skills || "").split(","))
@@ -1523,7 +1604,7 @@
         if (setText(f, skills)) record(f, "profile", skills);
         continue;
       }
-      if (LOCATION.test(lt) && t !== "textarea") locations.push(f);
+      if (t !== "textarea" && profileField(f, LOCATION_FIELD)) locations.push(f);
     }
 
     // 5. Comboboxes, only for fixed approved answers (country, state, Yes/No), with exact option match and read-back.
@@ -1540,7 +1621,7 @@
         if (typeof a === "boolean") {
           wants = [a ? "yes" : "no"];
           source = "eligibility";
-        } else if (LOCATION.test(lt)) {
+        } else if (profileField(f, LOCATION_FIELD)) {
           locations.push(f);
           continue;
         }
@@ -1646,7 +1727,9 @@
   }
   function unitChosen(u) {
     if (u.kind === "pair") return pairValue(u.pair);
-    const other = u.question?.companion && norm(u.question.companion.value) ? u.question.companion : null;
+    // What ApplyPilot typed into a box is never your answer to the question beside it.
+    const c = u.question?.companion;
+    const other = c && norm(c.value) && !state.filled.has(c) ? c : null;
     if (u.kind === "radio") return u.els.find((x) => x.checked) || other;
     if (u.kind === "check") return u.els.find(checkedOf) || other;
     return u.first;
@@ -1836,7 +1919,7 @@
       if (el) flagged.push(el);
     };
     const res = { blockers, flagged, relaxations: [], report: [], fingerprint: "", submitEl: null, resumeInput: null, resumeFile: null, verifiedBy: "" };
-    if (alreadyClicked()) add("already_clicked");
+    if (alreadyClicked()) add(clickedCode());
 
     // R3 right page
     const key = pageJobKey(location.href);
@@ -2107,7 +2190,7 @@
     if (!r.button) return refuse(r.code, r.text);
     api.clicked = true;
     document.documentElement.dataset.applypilotSubmitted = String(Date.now());
-    noteSuccessBefore();
+    noteClick();
     r.button.scrollIntoView({ block: "center" });
     r.button.click();
     return { clicked: true };
@@ -2122,32 +2205,56 @@
     showBanner("ok", "Everything matches what you approved. Click Submit application yourself.", []);
     state.armed = { fingerprint, button: btn, job: state.audit.job, settings: state.audit.settings };
     noteSuccessBefore();
-    if (!state.peterListener) {
-      state.peterListener = true;
-      // Capture phase on the document, so the snapshot is taken before the page reacts and a re-rendered
-      // Submit button still counts. Only a real click counts.
-      document.addEventListener(
-        "click",
-        (e) => {
-          const armed = state.armed;
-          if (!armed || !e.isTrusted || api.clicked || !(e.target instanceof Element)) return;
-          const b = e.target.closest("button,input[type=submit],input[type=button],[role=button]");
-          if (!b || (b !== armed.button && !(state.root?.contains(b) && SUBMIT.test(btnLabel(b))))) return;
-          const at = new Date().toISOString();
-          let now = "";
-          try {
-            now = syncChecks(armed.job, armed.settings).fingerprint;
-          } catch {}
-          state.peterClick = { at, fingerprintAtClick: now };
-          document.documentElement.dataset.applypilotPeterClicked = at;
-          noteSuccessBefore();
-          post("peter_click", { fingerprint: now, at, matches: now === armed.fingerprint });
-        },
-        true,
-      );
-    }
+    listenForClicks();
     btn.scrollIntoView({ block: "center" });
     return { armed: true, reason: "", submit: { path: cssPath(btn), label: btnLabel(btn) } };
+  }
+
+  // Your own Submit clicks, from the moment ApplyPilot finds the form: before it arms, while it waits, after the page
+  // re-renders the form, and in a tab left open for you. Capture phase on the document, so the snapshot is taken
+  // before the page reacts. Only a real click counts; ApplyPilot's own click() is never trusted.
+  function listenForClicks() {
+    if (state.clickListener) return;
+    state.clickListener = true;
+    document.addEventListener(
+      "click",
+      (e) => {
+        if (!e.isTrusted || !(e.target instanceof Element)) return;
+        const b = e.target.closest("button,input[type=submit],input[type=button],[role=button]");
+        const armed = state.armed;
+        if (!b || (b !== armed?.button && !SUBMIT.test(btnLabel(b)))) return;
+        const at = new Date().toISOString();
+        let now = "",
+          matches = false;
+        if (armed) {
+          try {
+            now = syncChecks(armed.job, armed.settings).fingerprint;
+            matches = now === armed.fingerprint && !!currentRoot(adapterFor(armed.job?.ats))?.contains(b);
+          } catch {}
+        }
+        state.peterClick = { at, fingerprintAtClick: now, matches };
+        document.documentElement.dataset.applypilotPeterClicked = at;
+        noteClick();
+        post("peter_click", { fingerprint: now, at, matches });
+      },
+      true,
+    );
+  }
+  // For a runner that wasn't listening when you clicked.
+  function clickState() {
+    const at = document.documentElement.dataset.applypilotPeterClicked || "";
+    return { clicked: !!at, at, matches: !!at && state.peterClick?.at === at && state.peterClick.matches === true };
+  }
+  // The runner stopped waiting (Stop, Skip or the countdown ran out), so the green outline and banner no longer hold.
+  function disarm(reasons = []) {
+    const b = state.armed?.button;
+    if (b?.style) {
+      b.style.outline = "";
+      b.style.outlineOffset = "";
+    }
+    state.armed = null;
+    showBanner("warn", "ApplyPilot stopped waiting, so this is no longer an approved send. Check every answer before you submit it yourself.", bannerItems(reasons));
+    return { disarmed: true };
   }
 
   // ---- outcome detection (section 10) ----------------------------------------------------------
@@ -2175,6 +2282,18 @@
     state.successBefore = successLines();
     state.href = location.href;
   };
+  const noteClick = () => {
+    noteSuccessBefore();
+    state.clickPath = location.pathname;
+    document.documentElement.dataset.applypilotClickPath = location.pathname;
+  };
+  // Success shown in the page counts only on the page where Submit was clicked (or a step below it): a click that
+  // didn't send and then Ashby's Overview tab, whose text may render after the route change, is not a confirmation.
+  const onClickPath = () => {
+    const at = state.clickPath || document.documentElement.dataset.applypilotClickPath || "";
+    const here = location.pathname;
+    return !!at && (here === at || here.startsWith(at.replace(/\/$/, "") + "/"));
+  };
   function sawRoot() {
     if (!state.successBefore) noteSuccessBefore();
     state.rootSeen = true;
@@ -2193,14 +2312,13 @@
     if (captchaState().challenge || CODE_STEP.test(text))
       return { outcome: "check", code: "challenge", reason: "A CAPTCHA or verification step appeared after Submit" };
     if (ALREADY.test(text)) return { outcome: "check", code: "already_applied", reason: "The site says you already applied. Check this one." };
-    const root = state.root?.isConnected ? state.root : locate(adapter)?.root || null;
-    if (root) sawRoot();
+    const root = currentRoot(adapter);
     // "Gone" means a form this page showed was removed or hidden. A page where no form was ever found (a posting
     // page, a form ApplyPilot couldn't locate) confirms only on the site's confirmation URL.
     const gone = state.rootSeen && (!root || !visible(root));
     const urlHit = !!adapter?.confirmUrl?.test(location.pathname + location.search);
     const errs = errorsIn(root || document.body, adapter, SUCCESS).length > 0;
-    if (((urlHit && SUCCESS.test(text)) || (gone && newSuccess())) && !errs)
+    if (((urlHit && SUCCESS.test(text)) || (gone && onClickPath() && newSuccess())) && !errs)
       return {
         outcome: "submitted",
         code: "confirmed",
@@ -2271,24 +2389,7 @@
     state.watching = true;
     const adapter = adapterFor(ats) || adapterFor(atsOfHost());
     currentRoot(adapter);
-    if (!state.watchListener) {
-      state.watchListener = true;
-      // Your own click on Submit in a watched tab, so a later confirmation is recorded as yours. Supervised mode
-      // has its own listener.
-      document.addEventListener(
-        "click",
-        (e) => {
-          if (state.armed || !e.isTrusted || !(e.target instanceof Element)) return;
-          const b = e.target.closest("button,input[type=submit],input[type=button],[role=button]");
-          if (!b || !SUBMIT.test(btnLabel(b))) return;
-          const at = new Date().toISOString();
-          document.documentElement.dataset.applypilotPeterClicked = at;
-          noteSuccessBefore();
-          post("peter_click", { at, matches: false });
-        },
-        true,
-      );
-    }
+    listenForClicks();
     // Without the site's confirmation URL, success shown in the page counts only after a real Submit click in this
     // page, yours or ApplyPilot's: a needs-you tab where you open the job's Overview never reads as sent.
     observeOutcome(
@@ -2337,12 +2438,14 @@
     document.documentElement.append(host);
     return host;
   }
-  function bannerNeedsYou(reasons = []) {
-    const items = (Array.isArray(reasons) ? reasons : [])
+  const bannerItems = (reasons) =>
+    (Array.isArray(reasons) ? reasons : [])
       .map((r) => (typeof r === "string" ? r : r?.text || r?.code || ""))
       .map((t) => clip(t, 200))
       .filter(Boolean)
       .slice(0, 10);
+  function bannerNeedsYou(reasons = []) {
+    const items = bannerItems(reasons);
     showBanner("warn", "ApplyPilot filled what it could and didn't submit. These need you:", items);
     for (const el of [...state.flagged, ...state.fillFlagged]) if (el?.isConnected && el.style) mark(el, "#f5b84b");
     return { shown: true, count: items.length };

@@ -9,7 +9,7 @@ import {
   approvedItemFromRow, CALIBRATION_NEEDED,
   type ApprovedItem, type Calibration, type SkippedItem, type SubmissionRow, type SubmitSettings,
 } from "./submission-store";
-import { alreadySubmittedReason, checkText, isStaleClaim, pillLabel, resumeNotice, staleText, tabGoneText } from "./submit-pill";
+import { alreadySubmittedReason, checkText, isStaleClaim, pillLabel, resumeNotice, staleText, tabElsewhereText, tabGoneText } from "./submit-pill";
 
 // "Ready to send": review the tailored jobs, approve them with one tap, and Chrome submits each with its own resume.
 // Everything an employer wrote (reasons, confirmation text, labels) is rendered as plain React text.
@@ -285,9 +285,10 @@ export function ReadyToSendPanel({
       connected ? bridge.stop() : Promise.resolve(),
       requestJson<{ revoked: string[]; tooLate: string[] }>("/api/submissions", jsonBody("PATCH", { action: "cancelAll" })),
     ]);
-    if (server.status === "fulfilled" && server.value.revoked.length && connected) {
-      await bridge.cancel(server.value.revoked).catch(() => undefined);
-    }
+    // The ones too late on the server go to Chrome as well: one given back there before its claim is cancelled
+    // in Chrome too, so it never starts again on Resume.
+    const asked = server.status === "fulfilled" ? [...server.value.revoked, ...server.value.tooLate] : [];
+    if (asked.length && connected) await bridge.cancel(asked).catch(() => undefined);
     await onReload();
     if (server.status === "rejected") {
       setError(`Chrome ${chrome.status === "fulfilled" ? "stopped" : "may still be sending"}, but the approvals couldn't be cancelled: ${messageOf(server.reason, "try again")}`);
@@ -611,7 +612,8 @@ export function SubmitPill({
             disabled={busy}
             onClick={() =>
               void act(async () => {
-                if (!(await bridge.focus(row.id))) throw new Error(tabGoneText(row.state));
+                const shown = await bridge.focus(row.id);
+                if (!shown.ok) throw new Error(shown.reason === "elsewhere" ? tabElsewhereText(row.state) : tabGoneText(row.state));
               })
             }
             className={smallButton}

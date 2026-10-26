@@ -57,6 +57,13 @@ export function tabGoneText(state: SubmissionRow["state"]) {
     : "That tab isn't open any more. Look for a confirmation email, then say whether it went through.";
 }
 
+// "Show tab" found the job's tab still open, but on another page that no longer holds the job.
+export function tabElsewhereText(state: SubmissionRow["state"]) {
+  return state === "needs_you"
+    ? "That tab is on another page now. Use Open application instead."
+    : "That tab is on another page now. Look for a confirmation email, then say whether it went through.";
+}
+
 export function staleText(row: Pick<SubmissionRow, "claimMode">) {
   return `No result from Chrome for over ${Math.round(staleAfterMs(row.claimMode) / 60_000)} minutes. Look for a confirmation email.`;
 }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { alreadySubmittedReason, checkText, isStaleClaim, pillLabel, resumeNotice, staleText, submittedLabel, tabGoneText } from '../app/submit-pill.ts';
+import { alreadySubmittedReason, checkText, isStaleClaim, pillLabel, resumeNotice, staleText, submittedLabel, tabElsewhereText, tabGoneText } from '../app/submit-pill.ts';
 
 const NOW = Date.parse('2026-10-26T12:00:00Z');
 const MIN = 60_000;
@@ -38,6 +38,15 @@ test('"Show tab" with the tab gone points only to what that row offers', () => {
   assert.match(tabGoneText('needs_you'), /Use Open application instead/);
   assert.doesNotMatch(tabGoneText('check'), /Open application/);
   assert.match(tabGoneText('check'), /confirmation email/);
+});
+
+test('"Show tab" with the tab open on another page says so, not that it is closed', () => {
+  for (const state of ['needs_you', 'check'] as const) {
+    assert.match(tabElsewhereText(state), /on another page/);
+    assert.doesNotMatch(tabElsewhereText(state), /isn't open/);
+  }
+  assert.match(tabElsewhereText('needs_you'), /Use Open application instead/);
+  assert.match(tabElsewhereText('check'), /confirmation email/);
 });
 
 test('sent and already-submitted wording follows who sent it', () => {

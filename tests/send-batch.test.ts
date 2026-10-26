@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { batchSkip, buildBatch, bytesToBase64, MAX_BATCH, resumeFilename, tailoredDate } from '../app/send-batch.ts';
+import { batchSkip, buildBatch, bytesToBase64, MAX_BATCH, resumeFilename, tailoredDate, usPosting } from '../app/send-batch.ts';
 import { pdfSafe } from '../app/resume-pdf.ts';
 import { buildAutofillProfile, profileHash, sha256Hex } from '../app/profile-records.ts';
 
@@ -148,4 +148,23 @@ test('at most 20 jobs go to Chrome at once', async () => {
   assert.equal(batch.jobs.length, 0);
   assert.equal(skipped.length, MAX_BATCH + 2);
   assert.deepEqual(skipped.slice(MAX_BATCH).map((s) => s.code), ['too_many', 'too_many']);
+});
+
+test('a posting counts as in the U.S. only when every place it names is, so work-authorization answers wait for you elsewhere', async () => {
+  for (const place of ['Atlanta, GA', 'Remote - US', 'Remote (United States)', 'Austin, TX 78701', 'New York', 'Hybrid - Atlanta, GA',
+    'Atlanta, GA · Remote', 'San Francisco or Remote', 'Portland, OR', 'Washington, D.C.', 'Grayson, Georgia, United States']) {
+    assert.equal(usPosting(place), true, place);
+  }
+  for (const place of ['', 'Remote', 'London, UK', 'Toronto, Ontario, Canada', 'Remote, Canada', 'US or Canada', 'Remote - EMEA',
+    'Berlin, Germany; New York, NY', 'Dublin, Ireland', null, undefined]) {
+    assert.equal(usPosting(place), false, String(place));
+  }
+  const us = await item('1');
+  const uk = await item('2');
+  const unknown = await item('3');
+  const { batch } = await buildBatch(
+    { approved: [us, uk, unknown], applications: [app('1', { location: 'Atlanta, GA' }), app('2', { location: 'London, UK' }), app('3')], savedProfile, settings },
+    { now: NOW },
+  );
+  assert.deepEqual(batch.jobs.map((job) => job.usPosting), [true, false, false]);
 });

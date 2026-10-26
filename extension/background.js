@@ -9,6 +9,8 @@ const VERSION = chrome.runtime.getManifest().version;
 const RUNNER_URL = chrome.runtime.getURL("runner.html");
 const DASHBOARD_TYPES = new Set(["AP_HELLO", "AP_BATCH", "AP_CANCEL", "AP_STOP", "AP_RESUME", "AP_FOCUS", "AP_PULL_RESULTS", "AP_RESULTS_ACK"]);
 const POPUP_TYPES = new Set(["AP_OPEN_RUNNER"]);
+// Forgetting the tab ids saved before Chrome started; the runner page waits for it before it recovers.
+let forgetting = Promise.resolve();
 
 async function sha256(bytes) {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
@@ -20,6 +22,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   let work;
   if (DASHBOARD_TYPES.has(msg.type) && sender.tab && sender.origin === DASHBOARD_ORIGIN) work = fromDashboard(msg, sender);
   else if (POPUP_TYPES.has(msg.type) && !sender.tab && String(sender.url || "").startsWith(chrome.runtime.getURL(""))) work = ensureRunner().then(() => ({ ok: true }));
+  else if (msg.type === "AP_RUNNER_START" && String(sender.url || "").startsWith(RUNNER_URL)) work = forgetting.then(() => ({ ok: true }));
   else return false; // AP_PAGE_EVENT and anything else belongs to the runner page
   work.then(sendResponse, (e) => sendResponse({ error: String((e && e.message) || e) }));
   return true;
@@ -120,4 +123,9 @@ async function ensureRunner() {
 }
 
 // Tab ids from before Chrome restarted belong to other tabs now.
-chrome.runtime.onStartup.addListener(() => forgetTabs(local).then(() => cleanup(local, Date.now())));
+chrome.runtime.onStartup.addListener(() => {
+  forgetting = forgetTabs(local)
+    .then(() => cleanup(local, Date.now()))
+    .catch(() => {});
+  return forgetting;
+});

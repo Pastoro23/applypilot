@@ -489,6 +489,28 @@ test('results: your own Submit click in a needs-you tab moves it to check and wi
   assert.equal(third.supersedesId, first.approvalId);
 });
 
+test('results: your own Submit click before ApplyPilot claimed it, or again after "It didn\'t go through", moves the job to check', async () => {
+  const { sqlite, db } = setup();
+  for (const id of ['a', 'b']) addApp(sqlite, id, ghUrl(id.charCodeAt(0)));
+  const yours = (item: ApprovedItem) =>
+    resultOf(item, null, 'check', { clicked: false, clickedBy: 'you', reasons: [{ code: 'you_clicked', text: 'You pressed Submit on this page yourself.' }] });
+  // You pressed Submit while ApplyPilot was still filling, before it asked to claim the job.
+  const early = await approveOne(db, 'a');
+  await recordResults(db, OWNER, [yours(early)], NOW + MIN);
+  assert.equal(state(sqlite, early.approvalId), 'check');
+  assert.deepEqual((await claimSubmission(db, OWNER, claimOf(early), NOW + 2 * MIN)).ok, false);
+  // You said it didn't go through and approved it again, then fixed the form in the same tab and pressed Submit.
+  const first = await approveOne(db, 'b');
+  await recordResults(db, OWNER, [resultOf(first, null, 'needs_you')], NOW);
+  await recordResults(db, OWNER, [yours(first)], NOW + MIN);
+  await resolveSubmission(db, OWNER, first.approvalId, 'not_sent', NOW + 2 * MIN);
+  const again = await approveOne(db, 'b', NOW + 3 * MIN);
+  assert.equal(again.supersedesId, first.approvalId);
+  await recordResults(db, OWNER, [yours(first)], NOW + 4 * MIN);
+  assert.equal(state(sqlite, first.approvalId), 'check');
+  assert.equal(state(sqlite, again.approvalId), 'revoked');
+});
+
 test('resolve works only on check rows or stale claims: 15 minutes, or 35 for a supervised claim waiting on your click', async () => {
   const { sqlite, db } = setup();
   for (const id of ['a', 'b', 'c']) addApp(sqlite, id, ghUrl(id.charCodeAt(0)));
@@ -620,6 +642,28 @@ test('"Stop everything" while a claim commits between its read and its write: th
   assert.deepEqual(await claimSubmission(db, OWNER, claimOf(item), NOW + 10 * MIN), { ok: false, reason: 'revoked' });
 });
 
+test('"Stop everything" while Chrome gives a claim back between the read and the write: the approval is still cancelled', async () => {
+  const { sqlite, db } = setup();
+  addApp(sqlite, 'a', ghUrl(1));
+  const item = await approveOne(db, 'a');
+  const attempt = await claimed(db, item);
+  let given = false;
+  // cancel has read the row as claimed; Chrome's not_clicked lands (approved again) before cancel's batch runs.
+  const racing = {
+    ...db,
+    batch: async (s: never) => {
+      if (!given) {
+        given = true;
+        await recordResults(db, OWNER, [resultOf(item, attempt, 'not_clicked')], NOW + 10);
+      }
+      return db.batch(s);
+    },
+  };
+  assert.deepEqual(await cancelSubmissions(racing as never, OWNER, 'all', NOW + 20), { revoked: [item.approvalId], tooLate: [] });
+  assert.equal(state(sqlite, item.approvalId), 'revoked');
+  assert.deepEqual(await claimSubmission(db, OWNER, claimOf(item), NOW + MIN), { ok: false, reason: 'revoked' });
+});
+
 test('"Stop everything" during a claim: when Chrome gives the claim back, it comes back cancelled', async () => {
   const { sqlite, db } = setup();
   addApp(sqlite, 'a', ghUrl(1));
@@ -647,10 +691,11 @@ test('calibration counts only supervised claims confirmed straight from your cli
   const ok = await approveOne(db, 'ok');
   await recordResults(db, OWNER, [mine(ok, await claimed(db, ok), { fingerprintMatched: true })], NOW + MIN);
   assert.deepEqual(await calibration(db), { greenhouse: 0, lever: 1, ashby: 0 });
-  // Confirmed while ApplyPilot watched, without a click it could compare: still counts.
+  // Confirmed while ApplyPilot watched, without a click it could compare: sent, but it doesn't count.
   const unknown = await approveOne(db, 'unknown');
   await recordResults(db, OWNER, [mine(unknown, await claimed(db, unknown))], NOW + MIN);
-  assert.equal((await calibration(db)).lever, 2);
+  assert.equal(state(sqlite, unknown.approvalId), 'submitted');
+  assert.equal((await calibration(db)).lever, 1);
   // The form changed before your click.
   const changed = await approveOne(db, 'changed');
   await recordResults(db, OWNER, [mine(changed, await claimed(db, changed), { fingerprintMatched: false })], NOW + MIN);
@@ -665,7 +710,7 @@ test('calibration counts only supervised claims confirmed straight from your cli
   await recordResults(db, OWNER, [resultOf(byHand, attemptH, 'needs_you')], NOW + MIN);
   await recordResults(db, OWNER, [mine(byHand, attemptH)], NOW + 2 * MIN);
   for (const item of [changed, resolved, byHand]) assert.equal(state(sqlite, item.approvalId), 'submitted');
-  assert.deepEqual(await calibration(db), { greenhouse: 0, lever: 2, ashby: 0 });
+  assert.deepEqual(await calibration(db), { greenhouse: 0, lever: 1, ashby: 0 });
 });
 
 test('results for an approval this account does not own are left in Chrome, not acked', async () => {

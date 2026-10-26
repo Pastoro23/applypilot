@@ -164,6 +164,8 @@ function cleanJob(job) {
       b64: job.resume.b64,
     },
     coverLetter: job.coverLetter,
+    // Whether the posting is in the U.S., where your work-authorization answers apply.
+    usPosting: job.usPosting === true,
   };
 }
 
@@ -213,6 +215,7 @@ export async function validateJob(job, { now, sha256, ledger, watchedKeys, sent 
   if (!Number.isSafeInteger(job.revision) || !HEX64.test(String(job.profileHash))) return REJECT.invalid;
   if (job.supersedesId != null && !UUID.test(String(job.supersedesId))) return REJECT.invalid;
   if (typeof job.coverLetter !== "string" || job.coverLetter.length > 4000) return REJECT.invalid;
+  if (job.usPosting !== undefined && typeof job.usPosting !== "boolean") return REJECT.invalid;
 
   if (!Array.isArray(job.applyUrls) || job.applyUrls.length < 1 || job.applyUrls.length > 4) return REJECT.url;
   for (const url of job.applyUrls) {
@@ -367,29 +370,42 @@ export async function ackResults(storage, resultIds, now) {
 // starts. Within one browser session an id is that tab's for as long as it is open.
 export async function forgetTabs(storage) {
   const all = (await storage.get(null)) || {};
-  const watches = Object.keys(all).filter((k) => k.startsWith("apWatch:"));
-  const writes = {};
-  for (const [key, rec] of Object.entries(all)) {
-    if (key.startsWith("apJob:") && isObject(rec) && rec.tabId != null) writes[key] = { ...rec, tabId: null };
+  // Each record is read again before it is changed: a runner page that started meanwhile may have saved it since,
+  // and an old copy written back would undo that.
+  for (const [key, w] of Object.entries(all)) {
+    if (!key.startsWith("apWatch:") || !isObject(w)) continue;
+    const latest = (await storage.get(key))?.[key];
+    if (isObject(latest) && latest.since === w.since && latest.approvalId === w.approvalId) await storage.remove(key);
   }
-  if (watches.length) await storage.remove(watches);
-  if (Object.keys(writes).length) await storage.set(writes);
+  for (const [key, rec] of Object.entries(all)) {
+    if (!key.startsWith("apJob:") || !isObject(rec) || rec.tabId == null) continue;
+    const latest = (await storage.get(key))?.[key];
+    if (isObject(latest) && latest.tabId === rec.tabId) await storage.set({ [key]: { ...latest, tabId: null } });
+  }
 }
 
-// "Show tab" on the dashboard: a job's saved tab is brought forward only while it still shows that job.
+// "Show tab" on the dashboard: a job's saved tab is brought forward while it shows that job, or while it is still
+// that job's watched tab on another page (you can go back to the form there). reason says why not: "gone" or
+// "elsewhere".
 export async function focusJobTab(storage, { tabs, windows }, approvalId) {
-  if (typeof approvalId !== "string") return { ok: false };
+  const gone = { ok: false, reason: "gone" };
+  if (typeof approvalId !== "string") return gone;
   const key = KEYS.job(approvalId);
   const rec = (await storage.get(key))[key];
-  if (!isObject(rec) || typeof rec.tabId !== "number" || typeof rec.job?.jobKey !== "string") return { ok: false };
+  if (!isObject(rec) || typeof rec.tabId !== "number" || typeof rec.job?.jobKey !== "string") return gone;
   try {
     const tab = await tabs.get(rec.tabId);
-    if (!tab || typeof tab.url !== "string" || !isAllowedUrl(tab.url) || parseAtsUrl(tab.url)?.jobKey !== rec.job.jobKey) return { ok: false };
+    if (!tab) return gone;
+    const shows = typeof tab.url === "string" && isAllowedUrl(tab.url) && parseAtsUrl(tab.url)?.jobKey === rec.job.jobKey;
+    if (!shows) {
+      const w = (await storage.get(KEYS.watch(rec.tabId)))?.[KEYS.watch(rec.tabId)];
+      if (!isObject(w) || w.approvalId !== approvalId) return { ok: false, reason: "elsewhere" };
+    }
     await tabs.update(rec.tabId, { active: true });
     if (typeof tab.windowId === "number") await windows.update(tab.windowId, { focused: true });
-    return { ok: true };
+    return { ok: true, reason: "" };
   } catch {
-    return { ok: false };
+    return gone;
   }
 }
 
@@ -635,12 +651,14 @@ export function createRunner(deps, opts = {}) {
     await storage.set({ [KEYS.watch(tabId)]: w });
     if (kind !== "supervised") await rearm(tabId, w);
     if (watches.size > LIMITS.watches) {
-      const oldest = [...watches.entries()]
-        .filter(([id, x]) => x.kind === "needs_you" && id !== current?.tabId && id !== tabId)
-        .sort((a, b) => String(a[1].since).localeCompare(String(b[1].since)))[0];
-      if (oldest) {
-        await removeWatch(oldest[0]);
-        await closeTab(oldest[0]);
+      // A tab you aren't looking at goes first, then the oldest. Its tab closes only while it still shows that job.
+      const list = [...watches.entries()].filter(([id, x]) => x.kind === "needs_you" && id !== current?.tabId && id !== tabId);
+      const active = new Map();
+      for (const [id] of list) active.set(id, (await tabInfo(id))?.active === true);
+      const [pick] = list.sort((a, b) => Number(active.get(a[0])) - Number(active.get(b[0])) || String(a[1].since).localeCompare(String(b[1].since)));
+      if (pick) {
+        await removeWatch(pick[0]);
+        if (await showsJob(pick[0], pick[1].jobKey)) await closeTab(pick[0]);
       }
     }
   }
@@ -751,9 +769,35 @@ export function createRunner(deps, opts = {}) {
     return false;
   }
 
-  async function needsYou(rec, reasons, { tabId, attemptId = null, banner = true } = {}) {
+  // You pressed Submit in this tab yourself before ApplyPilot pressed or highlighted anything: the page said so, or
+  // remembers it.
+  async function youClicked(tabId, list) {
+    if (early.get(tabId)?.kind === "peter_click") {
+      early.delete(tabId);
+      return true;
+    }
+    if (list.some((r) => r.code === "you_clicked")) return true;
+    if (!(await inject(tabId))) return false;
+    const c = await page(tabId, "clickState", undefined, TIMES.quick);
+    return usable(c) && c.clicked === true;
+  }
+
+  // disarm: ApplyPilot stops waiting for your click, so the page takes back its green "everything matches".
+  async function needsYou(rec, reasons, { tabId, attemptId = null, banner = true, disarm = false } = {}) {
     const list = cleanReasons(reasons);
-    if (banner && typeof tabId === "number" && (await inject(tabId))) await quiet(page(tabId, "bannerNeedsYou", list, TIMES.quick));
+    // That click may have sent it, so the job is locked in Chrome and goes to "check", never back for approval.
+    if (typeof tabId === "number" && (await youClicked(tabId, list))) {
+      return finish(rec, "check", {
+        reasons: [R("you_clicked", "You pressed Submit on this page yourself. ApplyPilot couldn't confirm it went through.")],
+        clicked: false,
+        clickedBy: "you",
+        attemptId,
+        tabId,
+        pageUrl: (await tabInfo(tabId))?.url || "",
+      });
+    }
+    if ((banner || disarm) && typeof tabId === "number" && (await inject(tabId)))
+      await quiet(page(tabId, disarm ? "disarm" : "bannerNeedsYou", list, TIMES.quick));
     const pageUrl = (await tabInfo(tabId))?.url || "";
     return finish(rec, "needs_you", { reasons: list, attemptId, tabId, clicked: false, pageUrl });
   }
@@ -786,6 +830,27 @@ export function createRunner(deps, opts = {}) {
 
   // ---- one job ----
 
+  // The runner's own window, asked for each time: the one it started in may have closed since.
+  async function newTab(url) {
+    let windowId = runState.windowId;
+    if (deps.currentWindowId) {
+      try {
+        const id = await deps.currentWindowId();
+        if (typeof id === "number") windowId = id;
+      } catch {}
+    }
+    try {
+      const t = await tabs.create({ ...(typeof windowId === "number" ? { windowId } : {}), url, active: true });
+      runState = { ...runState, windowId };
+      return t;
+    } catch (e) {
+      if (typeof windowId !== "number") throw e;
+      const t = await tabs.create({ url, active: true });
+      runState = { ...runState, windowId: typeof t?.windowId === "number" ? t.windowId : null };
+      return t;
+    }
+  }
+
   async function openForm(rec) {
     const j = rec.job;
     let last = R("form_not_found", "Couldn't find the application form.");
@@ -794,7 +859,7 @@ export function createRunner(deps, opts = {}) {
       await closeTab(lastTab);
       lastTab = null;
       await saveJob(rec, { state: "opening", tabId: null });
-      const created = await tabs.create({ ...(typeof runState.windowId === "number" ? { windowId: runState.windowId } : {}), url, active: true });
+      const created = await newTab(url);
       const tabId = created.id;
       current.tabId = tabId;
       early.delete(tabId);
@@ -1030,9 +1095,9 @@ export function createRunner(deps, opts = {}) {
       return finish(rec, "needs_you", { reasons: [R("tab_closed", "Tab closed before you submitted")], attemptId, tabId: null });
     }
     if (ev.type === "halt") {
-      return needsYou(rec, [R("stopped", "Stopped before you submitted. The form is still filled in its tab.")], { tabId, attemptId, banner: false });
+      return needsYou(rec, [R("stopped", "Stopped before you submitted. The form is still filled in its tab.")], { tabId, attemptId, disarm: true });
     }
-    return needsYou(rec, [R(ev.type === "skip" ? "skipped" : "timeout", "You didn't submit this one")], { tabId, attemptId, banner: false });
+    return needsYou(rec, [R(ev.type === "skip" ? "skipped" : "timeout", "You didn't submit this one")], { tabId, attemptId, disarm: true });
   }
 
   async function observe(rec, tabId) {
@@ -1121,7 +1186,12 @@ export function createRunner(deps, opts = {}) {
 
       // 5. Fill
       await saveJob(rec, { state: "filling" });
-      const filled = await page(tabId, "fill", { profile: j.profile, resume: j.resume, coverLetter: j.coverLetter, ats: j.ats }, TIMES.fill);
+      const filled = await page(
+        tabId,
+        "fill",
+        { profile: j.profile, resume: j.resume, coverLetter: j.coverLetter, ats: j.ats, company: j.company, usPosting: j.usPosting === true },
+        TIMES.fill,
+      );
       if (await isCancelled(id)) throw new Abort("cancelled");
 
       // 6. Audit (page-lib runs it twice, 1.5 s apart)
@@ -1178,22 +1248,44 @@ export function createRunner(deps, opts = {}) {
         attemptId: phase === "pre_claim" ? null : attemptId,
       });
     } finally {
+      // A click or confirmation that came in while this job was finishing belongs to the tab's watch now.
+      const t = current?.tabId;
+      const e = typeof t === "number" ? early.get(t) : null;
+      if (e && watches.has(t)) {
+        early.delete(t);
+        if (e.kind === "confirmed") watchSerial(() => watchConfirmed(t, e));
+        if (e.kind === "peter_click") watchSerial(() => watchClicked(t));
+      }
       current = null;
       emit();
     }
   }
 
   async function resumeWaiting(rec) {
+    // Your click may have reached this tab's watch while nothing waited for it, and finished the job already.
+    await watchQueue;
+    const latest = await get1(KEYS.job(rec.job.approvalId));
+    if (!isObject(latest) || latest.state !== "waiting_for_you") return;
     const tabId = rec.tabId;
     current.tabId = tabId;
     if (!(await tabInfo(tabId))) {
       return finish(rec, "needs_you", { reasons: [R("tab_closed", "Tab closed before you submitted")], attemptId: rec.attemptId, tabId: null });
     }
+    // Or you clicked while the runner was closed: the page remembers it.
+    if (await inject(tabId)) {
+      const c = await page(tabId, "clickState", undefined, TIMES.quick);
+      if (usable(c) && c.clicked === true) {
+        early.delete(tabId);
+        await saveJob(rec, { state: "observing", clickedBy: "you" });
+        const out = await observe(rec, tabId);
+        return finish(rec, out.outcome, { ...out, clicked: false, clickedBy: "you", attemptId: rec.attemptId, tabId, fingerprintMatched: c.matches === true });
+      }
+    }
     if (await isHalted()) {
       return needsYou(rec, [R("stopped", "Stopped before you submitted. The form is still filled in its tab.")], {
         tabId,
         attemptId: rec.attemptId,
-        banner: false,
+        disarm: true,
       });
     }
     // Peter may have submitted while the runner was closed: a confirmation already on screen ends the wait.
@@ -1437,34 +1529,45 @@ export function createRunner(deps, opts = {}) {
   let watchQueue = Promise.resolve();
   const watchSerial = (fn) => (watchQueue = watchQueue.then(fn).catch(() => {}));
 
-  // You pressed Submit in a watched tab, so a confirmation that follows is yours, not ApplyPilot's. In a needs-you
-  // tab that click may have sent the application even when no confirmation ApplyPilot knows follows, so the job is
-  // locked in Chrome and goes to "check" on the dashboard at once, not when the tab closes (the runner may be shut
-  // by then).
+  // You pressed Submit in a watched tab, so a confirmation that follows is yours, not ApplyPilot's. That click may
+  // have sent the application even when no confirmation ApplyPilot knows follows, so the job is locked in Chrome
+  // and goes to "check" on the dashboard at once, not when the tab closes (the runner may be shut by then). The same
+  // holds in a supervised tab whose wait wasn't listening. Every click counts: after "It didn't go through" you may
+  // fix the form and press Submit again, and that is news for the server too.
   async function watchClicked(tabId) {
     const w = watches.get(tabId);
-    if (!w || w.peterClicked) return;
+    if (!w) return;
     w.clickedBy = "you";
     w.peterClicked = true;
+    const supervisedTab = w.kind === "supervised";
+    if (supervisedTab) w.kind = "check";
     const key = KEYS.job(w.approvalId);
     const rec = (await storage.get(key))[key];
     const o = { clicked: false, clickedBy: "you", attemptId: w.attemptId ?? null, pageUrl: (await tabInfo(tabId))?.url || "" };
     const writes = { [KEYS.watch(tabId)]: w };
     let result = null;
-    if (w.kind === "needs_you" && isObject(rec) && rec.job && rec.state !== "done:submitted") {
-      Object.assign(writes, await ledgerFor(rec, "check", o));
-      const reasons = [R("you_clicked", "You clicked Submit in the open tab. ApplyPilot couldn't confirm it went through.")];
-      result = makeResult(rec, "check", { ...o, reasons });
-      const next = { ...rec, state: "done:check", reasons: result.reasons, finishedAt: result.finishedAt, lastResultId: result.resultId, updatedAt: iso() };
-      writes[KEYS.out(result.resultId)] = result;
-      writes[key] = next;
-      track(next);
+    if (isObject(rec) && rec.job && ["done:needs_you", "done:check", "waiting_for_you"].includes(rec.state)) {
+      const ledger = await ledgerFor(rec, "check", o);
+      for (const entry of Object.values(ledger)) entry.clickedAt = iso();
+      Object.assign(writes, ledger);
+      // A "check" still on its way to the server already says so.
+      const unsent = rec.state === "done:check" && rec.lastResultId && isObject(await get1(KEYS.out(rec.lastResultId)));
+      if (!unsent) {
+        const reasons = [R("you_clicked", "You clicked Submit in the open tab. ApplyPilot couldn't confirm it went through.")];
+        result = makeResult(rec, "check", { ...o, reasons });
+        const next = { ...rec, state: "done:check", reasons: result.reasons, finishedAt: result.finishedAt, lastResultId: result.resultId, updatedAt: iso() };
+        if (next.job?.resume?.b64) next.job = withoutPdf(next.job);
+        writes[KEYS.out(result.resultId)] = result;
+        writes[key] = next;
+        track(next);
+      }
     }
     await quiet(storage.set(writes));
     if (result) {
       emit();
       await notifyResults();
     }
+    if (supervisedTab) await rearm(tabId, w);
   }
 
   // Peter finished a needs-you, check or skipped tab himself: record the real outcome.
