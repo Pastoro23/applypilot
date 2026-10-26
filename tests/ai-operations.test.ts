@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { claimOperation, completeOperation, failOperation, runAiOperation } from '../app/ai-operations.ts';
+import { AI_DAILY_LIMIT, AI_HOURLY_LIMIT, claimOperation, completeOperation, failOperation, runAiOperation } from '../app/ai-operations.ts';
 import { saveTailoredVersion } from '../app/tailored-store.ts';
 import { testDatabase } from './sqlite-helper.ts';
 
@@ -20,9 +20,9 @@ test('overlapping AI requests are blocked across kinds and duplicates', async ()
 });
 test('failed attempts count toward the hourly limit; daily budget is independent', async () => {
   const { db, sqlite } = testDatabase(); const now = Date.now();
-  for (let n = 0; n < 6; n++) { const c = await claimOperation(db, 'a', 'tailor', 'job' + n, now); await failOperation(db, c.id); }
+  for (let n = 0; n < AI_HOURLY_LIMIT; n++) { const c = await claimOperation(db, 'a', 'tailor', 'job' + n, now); await failOperation(db, c.id); }
   await assert.rejects(claimOperation(db, 'a', 'tailor', 'next', now), /limit was reached/);
-  for (let n = 0; n < 20; n++) sqlite.prepare("INSERT INTO ai_operations VALUES (?, 'b', 'pdf', ?, 'failed', NULL, ?)").run('old' + n, 'hash' + n, now - 4_000_000);
+  for (let n = 0; n < AI_DAILY_LIMIT; n++) sqlite.prepare("INSERT INTO ai_operations VALUES (?, 'b', 'pdf', ?, 'failed', NULL, ?)").run('old' + n, 'hash' + n, now - 4_000_000);
   await assert.rejects(claimOperation(db, 'b', 'tailor', 'next', now), /limit was reached/);
 });
 test('a failed operation can be retried after cooldown and preserves attempt count', async () => {
@@ -78,4 +78,11 @@ test('a completed duplicate is not charged again even if the initial cache read 
   const reused = await claimOperation(racing, 'a', 'pdf', 'race', now);
   assert.deepEqual(reused.cached, { text: 'done' });
   assert.equal(sqlite.prepare('SELECT count(*) AS n FROM ai_operations').get()?.n, 1);
+});
+test('a running request and a reached limit get different messages', async () => {
+  const { db } = testDatabase(); const now = Date.now();
+  const c = await claimOperation(db, 'a', 'tailor', 'job', now);
+  await assert.rejects(claimOperation(db, 'a', 'tailor', 'other', now), /still running/);
+  await completeOperation(db, c.id, {});
+  await claimOperation(db, 'a', 'tailor', 'other', now);
 });

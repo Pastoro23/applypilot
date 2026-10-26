@@ -300,7 +300,7 @@ export function TailorPanel({
         </button>
       </div>
       {error && <p className="text-sm text-rose-300">{error}</p>}
-      <p className="text-xs leading-5 text-slate-400">Your latest description is saved before tailoring. AI fit scores are estimates; check every fact before applying. Identical requests reuse a recent result. AI limit: 6 requests per hour and 20 per day.</p>
+      <p className="text-xs leading-5 text-slate-400">Your latest description is saved before tailoring. AI fit scores are estimates; check every fact before applying. Identical requests reuse a recent result. AI limit: 30 requests per hour and 80 per day.</p>
       {saved && (
         <details onToggle={(event) => { if (event.currentTarget.open) void loadHistory(); }} className="text-xs text-slate-400">
           <summary className="cursor-pointer">Previous saved versions</summary>

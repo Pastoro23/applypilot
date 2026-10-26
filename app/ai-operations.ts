@@ -16,8 +16,8 @@ export interface SqlDatabase {
 }
 
 type Operation = { id: string; status: string; result_json: string | null; created_at: number };
-export const AI_HOURLY_LIMIT = 6;
-export const AI_DAILY_LIMIT = 20;
+export const AI_HOURLY_LIMIT = 30;
+export const AI_DAILY_LIMIT = 80;
 const LEASE_MS = 180_000;
 
 export async function inputHash(value: unknown) {
@@ -55,7 +55,10 @@ export async function claimOperation(db: SqlDatabase, owner: string, kind: strin
       AND input_hash = ? AND status = 'succeeded' AND created_at > ? ORDER BY created_at DESC LIMIT 1`)
       .bind(owner, kind, hash, now - 86_400_000).first<{ result_json: string }>();
     if (completed?.result_json) return { id, cached: JSON.parse(completed.result_json) as unknown };
-    throw new UserFacingError('Another AI request is running or your limit was reached (6 per hour, 20 per day). Try later.', 429);
+    const running = await db.prepare(`SELECT 1 AS n FROM ai_operations WHERE owner_email = ? AND status = 'processing' AND created_at > ? LIMIT 1`)
+      .bind(owner, now - LEASE_MS).first<{ n: number }>();
+    if (running) throw new UserFacingError('Another AI request is still running, such as a job being tailored after you added it. Try again in a minute.', 429);
+    throw new UserFacingError(`Your AI limit was reached (${AI_HOURLY_LIMIT} per hour, ${AI_DAILY_LIMIT} per day). Try later.`, 429);
   }
   return { id, cached: undefined };
 }
