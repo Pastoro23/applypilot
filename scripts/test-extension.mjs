@@ -164,6 +164,14 @@ test("separate employer sections still map one record each", async () => {
   assert.deepEqual([r.vals.c1, r.vals.c2], ["Acme Health", "Beta Corp"]);
 });
 
+test("school and degree dropdowns on Greenhouse's newer form are left for you, not typed into", async () => {
+  const education = [{ school: "Georgia Piedmont Technical College", degree: "A.A.S. Information Technology", field: "", startYear: "2019", endYear: "2021" }];
+  const r = await run(await fixture("greenhouse-remix.html"), { ...base, education });
+  assert.deepEqual([r.vals["school--0"], r.vals["degree--0"], r.vals["discipline--0"]], ["", "", ""]);
+  assert.deepEqual([r.vals["start-year--0"], r.vals["end-year--0"]], ["2019", "2021"]);
+  assert.ok(r.res.blockers.some((b) => /^Degree\b/.test(b)), JSON.stringify(r.res.blockers));
+});
+
 // ---- batch functions on synthetic ATS fixtures -------------------------------------------------------
 
 const URLS = {
@@ -781,6 +789,126 @@ for (const [name, legend] of [
         assert.equal((await values(p)).ack, false);
       },
     ));
+
+// The text that says what a privacy box agrees to may sit anywhere in its question: the description Greenhouse's newer
+// form links with aria-describedby, a paragraph or help line in the fieldset, the option's own words with no <label>,
+// a Lever card's description or an Ashby field's. Each of these adds more than the privacy policy, so the box stays
+// unticked and goes to you.
+const remixDescription = (text) =>
+  fixture("greenhouse-remix.html").then((html) => {
+    const changed = html.replace(/(<div id="question_9601409101\[\]-description"[^>]*>\s*)<p>[\s\S]*?<\/p>/, (_, open) => `${open}<p>${text}</p>`);
+    assert.notEqual(changed, html);
+    return prepare("greenhouse", {}, { html: changed, profile: EDU_PROFILE, fill: { allowPrivacyAck: true } });
+  });
+test("privacy-policy box: a description on Greenhouse's newer form that adds terms, texts or arbitration still goes to you", () =>
+  using(
+    remixDescription("By checking this box you also agree to our Terms of Service, consent to receive SMS and marketing messages, and agree that any dispute will be resolved by binding arbitration."),
+    async ({ page: p, filled, audit }) => {
+      assert.deepEqual(codes(audit), ["attestation"]);
+      assert.deepEqual(audit.relaxations, []);
+      assert.equal((await values(p))[PRIVACY_BOX], false);
+      assert.ok(!filled.filled.some((x) => x.source === "privacy_ack"));
+    },
+  ));
+
+test("privacy-policy box: the real form's own description line, naming the company's policy, is still ticked", () =>
+  using(remixDescription(`By clicking "Submit Application", you agree to Invisible's <a href="/privacy">Privacy Policy</a>.`), async ({ page: p, audit }) => {
+    assert.deepEqual(codes(audit), []);
+    assert.deepEqual(audit.relaxations, ["privacy_ack"]);
+    assert.equal((await values(p))[PRIVACY_BOX], true);
+  }));
+
+const privacyFieldset = (legend, inner = "", option = '<label for="ack">Yes</label>') =>
+  `<div class="field-wrapper"><fieldset class="checkbox" id="q[]" aria-required="true"><legend>${legend} <span class="required">*</span></legend>${inner}<input type="checkbox" required id="ack" name="q[]" value="1">${option}</fieldset></div>`;
+const PRIVACY_PLUS = [
+  ["a paragraph inside the fieldset", "greenhouse", privacyFieldset("Please acknowledge that you have read and agree to our Privacy Policy.", "<p>You also consent to the transfer of your personal data to third parties and to be contacted about future roles.</p>")],
+  ["a help line inside the fieldset", "greenhouse", privacyFieldset("Please acknowledge that you have read and agree to our Candidate Privacy Notice.", '<div class="help">Ticking this box also means we may keep your details for 24 months and contact you about future job opportunities.</div>')],
+  ["the option's own words in a bare span", "greenhouse", privacyFieldset("Privacy Policy", "", "<span>I agree to the Terms of Service and to receive SMS messages</span>")],
+  ["'I agree to this statement' under a consent paragraph", "greenhouse", privacyFieldset("Privacy Policy", "<p>I consent to receive text messages and marketing emails, and agree to binding arbitration of any claim.</p>", '<label for="ack">I agree to this statement</label>')],
+  ["another document beside the privacy notice", "greenhouse", privacyFieldset('I have read and agree to the <a href="/privacy">Privacy Notice</a> and the <a href="/statement">Applicant Statement</a>.')],
+  ["a recruitment policy beside the privacy policy", "greenhouse", privacyFieldset('I have read and agree to the <a href="/privacy">Privacy Policy</a> and the <a href="/recruiting">Recruitment Policy</a>.')],
+  ["a legend naming another document", "greenhouse", privacyFieldset("Applicant Statement", "", '<label for="ack">I have read and agree to the Privacy Policy</label>')],
+  ["a Lever card's description", "lever", `<li class="application-question"><div class="application-label"><div class="text">Privacy Notice<span class="required">✱</span></div></div><div class="application-description"><p>By ticking this box you also consent to receive recruiting text messages and to the sharing of your data with our partners.</p></div><div class="application-field"><ul><li><label><input type="checkbox" id="ack" name="cards[c1][field0]" value="I have read the privacy notice" required> I have read the privacy notice</label></li></ul></div></li>`],
+  ["an Ashby field's description", "ashby", `<div class="field-entry"><label for="ack">I agree to the Privacy Policy*</label><p class="description">Checking this box also means you agree to our Terms of Use and consent to receive SMS messages.</p><input type="checkbox" id="ack" required></div>`],
+];
+for (const [name, ats, fields] of PRIVACY_PLUS)
+  test(`privacy-policy box: more than the policy in ${name} still goes to you`, () =>
+    using(prepare(ats, { fields }, { fill: { allowPrivacyAck: true } }), async ({ page: p, audit }) => {
+      assert.ok(codes(audit).includes("attestation"), JSON.stringify(audit.blockers));
+      assert.ok(!audit.relaxations.includes("privacy_ack"));
+      assert.equal((await values(p)).ack, false);
+    }));
+
+// A box that says only that you've read the policy, with no "agree" or "acknowledge", is ticked and passes the same way,
+// on each site's own layout; with the setting off at the check it goes to you as an acknowledgement.
+const PRIVACY_ONLY = [
+  ["'I have read the Privacy Policy'", "greenhouse", privacyFieldset("I have read the Privacy Policy.")],
+  ["'I confirm that I have read and understood the Candidate Privacy Notice'", "greenhouse", privacyFieldset("I confirm that I have read and understood the Candidate Privacy Notice")],
+  ["a Lever card", "lever", `<li class="application-question"><div class="application-label"><div class="text">Privacy Notice<span class="required">✱</span></div></div><div class="application-field"><ul><li><label><input type="checkbox" id="ack" name="cards[c1][field0]" value="1" required> I have read the privacy notice</label></li></ul></div></li>`],
+  ["an Ashby field", "ashby", `<div class="field-entry"><label for="ack">I agree to the Privacy Policy*</label><input type="checkbox" id="ack" required></div>`],
+];
+for (const [name, ats, fields] of PRIVACY_ONLY)
+  test(`privacy-policy box: ${name} is ticked and listed with the submission`, () =>
+    using(prepare(ats, { fields }, { fill: { allowPrivacyAck: true } }), async ({ page: p, audit }) => {
+      assert.deepEqual(codes(audit), []);
+      assert.deepEqual(audit.relaxations, ["privacy_ack"]);
+      assert.equal((await values(p)).ack, true);
+      const off = await auditPage(p, job(ats), { allowPrivacyAck: false });
+      assert.deepEqual(codes(off), ["attestation"]);
+    }));
+
+// Education dropdowns: a certificate or unfinished study is never sent as a degree, a doctorate's letters are not a
+// bachelor's or master's, and a minor is never the discipline.
+for (const [credential, field, degree, discipline] of [
+  ["Cisco Certified Network Associate (CCNA)", "Information Technology", "", "Information Technology"],
+  ["Certified Scrum Master (CSM)", "", "", ""],
+  ["Some college coursework towards B.S.", "", "", ""],
+  ["Doctor of Business Administration (D.B.A.)", "Business Administration", "", "Business Administration"],
+  ["M.B.A.", "Business Administration", "Master of Business Administration (M.B.A.)", "Business Administration"],
+  ["BBA, minor in Accounting", "", "Bachelor's Degree", ""],
+])
+  test(`Greenhouse's newer form: "${credential}" is chosen as ${degree || "no degree"} and ${discipline || "no discipline"}`, () =>
+    using(remix({ ...EDU_PROFILE, education: [{ ...EDU_PROFILE.education[0], degree: credential, field }] }), async ({ page: p, audit }) => {
+      const s = await singles(p);
+      assert.deepEqual([s["degree--0"], s["discipline--0"]], [degree, discipline]);
+      const texts = audit.blockers.map((b) => b.text);
+      if (!degree) assert.ok(texts.some((t) => t.endsWith(": Degree")), JSON.stringify(texts));
+      if (!discipline) assert.ok(texts.some((t) => t.endsWith(": Discipline")), JSON.stringify(texts));
+    }));
+
+// Your country as you typed it: "U.S", "America" and "USA" all live in the U.S., so the state question gets your state
+// and both country lists show "United States". A U.S. state beside a country ApplyPilot can't read goes to you.
+for (const country of ["U.S", "America", "USA", "The United States."])
+  test(`Greenhouse's newer form: country "${country}" is the United States for every country and state question`, () =>
+    using(remix({ ...EDU_PROFILE, country }), async ({ page: p, filled }) => {
+      const s = await singles(p);
+      assert.deepEqual([s.country, s.question_9601406101, s.question_9601407101], ["United States +1", "United States", "Georgia"]);
+      assert.equal(filled.blockers.length, 0, JSON.stringify(filled.blockers));
+    }));
+
+test("Greenhouse's newer form: a U.S. state with a country ApplyPilot can't read leaves the state question to you", () =>
+  using(remix({ ...EDU_PROFILE, country: "Untied Staets" }), async ({ page: p, audit }) => {
+    assert.equal((await singles(p)).question_9601407101, "");
+    assert.ok(audit.blockers.some((b) => b.code === "unanswered_required" && /state of residence/.test(b.text)), JSON.stringify(audit.blockers));
+  }));
+
+test("a location autocomplete never takes a longer place name that starts with your city", () =>
+  using(
+    prepare("greenhouse", {
+      fields: combo(["candidate-location", "Location (City)", ["Union City, New Jersey, United States", "Union, Kentucky, United States", "Union, Missouri, United States"], "city"]),
+      script: `<script src="/assets/combobox.js"></script>`,
+    }, { profile: { ...PROFILE, city: "Union", state: "NJ" } }),
+    async ({ page: p, audit }) => {
+      assert.equal(await p.evaluate(() => document.querySelector(".select__single-value")?.textContent || ""), "");
+      assert.deepEqual(codes(audit), ["unanswered_required"]);
+    },
+  ));
+
+test("a state dropdown that lists postal codes takes your state's code", () =>
+  using(prepare("greenhouse", { fields: combo(["state", "State", ["AL", "AK", "AZ", "GA", "MI", "NY"]]), script: `<script src="/assets/combobox.js"></script>` }), async ({ page: p, audit }) => {
+    assert.equal(await p.evaluate(() => document.querySelector(".select__single-value")?.textContent), "GA");
+    assert.deepEqual(codes(audit), []);
+  }));
 
 test("a required plain-text location with no suggestions is left empty for you", () =>
   using(prepare("greenhouse", { fields: field("location", 'Location<span class="asterisk">*</span>', `<input id="location" name="location" type="text" aria-required="true">`) }), async ({ page: p, filled, audit }) => {

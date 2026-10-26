@@ -830,6 +830,9 @@ export async function saveSettings(db: SqlDatabase, owner: string, input: unknow
     SELECT cal.*, p.owner_email AS profile_owner, p.apply_settings_json AS settings_json
     FROM (SELECT ? AS owner) o CROSS JOIN cal LEFT JOIN profiles p ON p.owner_email = o.owner`).bind(owner, owner).first<DbRow>();
   if (!row?.profile_owner) throw new UserFacingError("Your profile isn't set up yet. Reload and try again.", 404);
+  const before = parseSettings(row.settings_json);
+  // A dashboard tab opened before this setting existed saves without it; that keeps your choice, not the default.
+  if (isObject(input) && input.allowPrivacyAck === undefined) next.allowPrivacyAck = before.allowPrivacyAck;
   const calibration = calibrationOf(row);
   for (const ats of ATS_LIST) {
     if (next.auto[ats] && calibration[ats] < CALIBRATION_NEEDED) {
@@ -844,7 +847,7 @@ export async function saveSettings(db: SqlDatabase, owner: string, input: unknow
     db.prepare("UPDATE profiles SET apply_settings_json = ? WHERE owner_email = ?").bind(JSON.stringify(next), owner),
     db.prepare(`INSERT INTO submission_events (id, owner_email, submission_id, at, actor, event, detail_json)
       VALUES (?, ?, '', ?, 'peter', 'settings', ?)`)
-      .bind(crypto.randomUUID(), owner, nowIso, detailJson({ before: parseSettings(row.settings_json), after: next })),
+      .bind(crypto.randomUUID(), owner, nowIso, detailJson({ before, after: next })),
   ]);
   return next;
 }

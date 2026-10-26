@@ -396,8 +396,9 @@
           .join(", ")
       : String(data.skills || "").trim();
     const recordRoots = [...sectionRoots(WORK), ...sectionRoots(EDU)];
-    filled += fillSections(sectionRoots(WORK), data.workHistory || []);
-    filled += fillSections(sectionRoots(EDU), data.education || []);
+    // Typing into a dropdown's search box chooses nothing, so record dropdowns stay empty and are listed for you.
+    filled += fillSections(sectionRoots(WORK), data.workHistory || [], undefined, isCombo);
+    filled += fillSections(sectionRoots(EDU), data.education || [], undefined, isCombo);
     for (const f of document.querySelectorAll("input,select,textarea")) {
       const t = (f.type || "").toLowerCase();
       if (f.disabled || f.readOnly || ["hidden", "password", "submit", "button", "reset", "image"].includes(t)) continue;
@@ -632,9 +633,10 @@
   ];
   const IDENTITY = PROFILE_FIELDS.filter(([k]) => ["firstName", "lastName", "fullName", "email", "phone"].includes(k));
   const SKILLS = [["skills", /^(key |technical |relevant |core |your )?skills( (and|&) (technologies|expertise|tools))?$|^technologies$|^(areas of )?expertise$/]];
+  // Each country's own name first: that is what a country list is searched by.
   const COUNTRY_NAMES = [
-    ["united states", "united states of america", "usa", "us", "u.s.", "u.s.a."],
-    ["united kingdom", "uk", "u.k.", "great britain", "united kingdom of great britain and northern ireland"],
+    ["united states", "united states of america", "usa", "us", "u.s.", "u.s.a.", "u.s", "u.s.a", "america"],
+    ["united kingdom", "uk", "u.k.", "u.k", "great britain", "united kingdom of great britain and northern ireland"],
   ];
   const APPROVED = ["profile", "record", "eligibility", "cover_letter", "resume"];
   const CHALLENGE_FRAMES = [
@@ -1282,7 +1284,11 @@
     if (!v) return [];
     const out = [v];
     if (Object.hasOwn(alias, v)) out.push(alias[v]);
-    if (key === "country") for (const names of COUNTRY_NAMES) if (out.some((x) => names.includes(x))) out.push(...names);
+    if (key === "country") {
+      // As typed into a free-text profile: "The United States.", "United States (US)".
+      const bare = v.replace(/^the\s+/, "").replace(/\s*\((us|usa|uk)\)$/, "").replace(/[\s,;:!]+$/, "").replace(/([a-z]{2,})\.$/, "$1");
+      for (const names of COUNTRY_NAMES) if ([...out, bare].some((x) => names.includes(x))) out.push(...names);
+    }
     if (key === "state") {
       const c = stateCode(value);
       if (c) out.push(c.toLowerCase(), US_STATES[c].toLowerCase());
@@ -1313,55 +1319,109 @@
     return null;
   }
   // A box that only acknowledges reading a privacy policy or notice ("Please acknowledge that you have read and agree to
-  // our Privacy Policy." with one "Yes" box). Every word must come from this short list, so a box that also certifies
-  // answers, accepts terms, consents to contact or sharing, or says anything else stays with you.
+  // our Privacy Policy." with one "Yes" box). All of the box's text is read: its labels and descriptions, its group's
+  // legend, and everything else in the largest box around it that holds no other field (Greenhouse's newer form puts
+  // the question's description after the fieldset). Each piece may name privacy policies or notices and nothing else,
+  // and every other word must come from this short list, so a box that also certifies answers, accepts terms, names
+  // another document, consents to contact or sharing, or says anything else stays with you.
+  const PRIVACY_DOC = "((job )?applicant |candidate |recruitment |recruiting |data )?privacy (policy|notice|statement)";
   const PRIVACY_ACK_WORDS = new Set(
-    `please acknowledge acknowledged confirm that i you have has i've you've read reviewed and understand understood
-    agree accept to the our this privacy policy notice statement applicant candidate recruitment recruiting job yes by
-    checking box ticking tick check here`.split(/\s+/),
+    `please acknowledge acknowledged acknowledgement acknowledgment confirm that i you have has i've you've read reviewed
+    and understand understood agree accept to the our yes required`.split(/\s+/),
   );
+  // "By checking this box", "Tick here", and the line under the box on Greenhouse's newer form: 'By clicking "Submit
+  // Application", you agree to the company's Privacy Policy.'
+  const PRIVACY_ACK_PHRASES = [
+    /\b(by )?(checking|ticking|selecting|check|tick) (this|the) (check ?)?box\b|\b(check|tick) here\b/g,
+    /\bby (clicking|pressing|selecting) (on )?(the )?"?submit( my| your)?( job)? application"?( button)?/g,
+  ];
+  const OTHER_FIELDS =
+    "input:not([type=hidden]),select,textarea,[role=combobox],[role=checkbox],[role=radio],[role=switch],[role=textbox],[contenteditable]:not([contenteditable=false])";
+  // How many privacy documents one piece of text names, or -1 when it says anything else.
+  function privacyAckPart(raw, company) {
+    let t = norm(raw).toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/[\u201c\u201d]/g, '"');
+    const co = norm(company).toLowerCase();
+    if (co) t = t.split(`${co}'s`).join("the");
+    // One possessive name right before the policy ("Invisible's Privacy Policy") reads as "the".
+    t = t.replace(new RegExp(`(^|\\s)[a-z0-9&.-]+'s (?=${PRIVACY_DOC}\\b)`, "g"), "$1the ");
+    let docs = 0;
+    t = t.replace(new RegExp(`\\b${PRIVACY_DOC}\\b`, "g"), () => (docs++, " "));
+    for (const re of PRIVACY_ACK_PHRASES) t = t.replace(re, " ");
+    const words = t.replace(/[*✱.,:;!"()]/g, " ").split(/\s+/).filter(Boolean);
+    return words.every((w) => PRIVACY_ACK_WORDS.has(w)) ? docs : -1;
+  }
   function privacyAckBox(f, root, company = "") {
     if (f.tagName !== "INPUT" || typeOf(f) !== "checkbox" || checkGroup(f, root).length !== 1) return false;
-    let text = [textOf(groupLabelEl(f)), ...[...new Set(labelEls(f))].map((l) => textOf(l))]
-      .join(" ")
-      .toLowerCase()
-      .replace(/[\u2018\u2019]/g, "'");
-    const co = norm(company).toLowerCase();
-    if (co) text = text.split(`${co}'s`).join("the");
-    // One possessive name right before the policy ("Invisible's Privacy Policy") reads as "the".
-    text = text.replace(/(^|\s)[a-z0-9&.-]+'s (?=privacy (policy|notice)\b)/g, "$1the ");
-    if (!/\bprivacy (policy|notice)\b/.test(text)) return false;
-    const words = text.replace(/[*✱.,:;!"()]/g, " ").split(/\s+/).filter(Boolean);
-    return words.length > 0 && words.every((w) => PRIVACY_ACK_WORDS.has(w));
+    let box = null;
+    for (let e = f.parentElement; e && e !== root && root.contains(e); e = e.parentElement) {
+      if (Array.from(e.querySelectorAll(OTHER_FIELDS)).some((x) => x !== f)) break;
+      box = e;
+    }
+    // A box with no wrapper of its own shares its text with other questions, so what it says can't be told apart.
+    if (!box) return false;
+    const ids = (name) => (f.getAttribute(name) || "").split(/\s+/).filter(Boolean);
+    const errors = ids("aria-errormessage");
+    const group = f.closest(BATCH_GROUPS);
+    const parts = [
+      textOf(box),
+      textOf(groupLabelEl(f)),
+      group && root.contains(group) ? textOf(group) : "",
+      textOf(optionsQuestion([f], root)?.label),
+      ...labelEls(f).map((l) => textOf(l)),
+      ...ids("aria-describedby")
+        .filter((id) => !errors.includes(id))
+        .map((id) => textOf(document.getElementById(id))),
+      f.getAttribute("aria-label"),
+      f.getAttribute("description"),
+    ].filter((x) => norm(x));
+    const docs = parts.map((x) => privacyAckPart(x, company));
+    return docs.every((n) => n >= 0) && docs.some((n) => n > 0);
   }
   const inUS = (country) => variants("country", country).includes("united states");
+  // The name a country list is searched by. A list filtered by what you type shows "United States" for that name only.
+  const countryName = (country) => {
+    const names = COUNTRY_NAMES.find((n) => variants("country", country).includes(n[0]));
+    return names ? names[0].replace(/\b[a-z]/g, (c) => c.toUpperCase()) : norm(country);
+  };
   // A phone country picker shows the dialling code after each name ("United States +1").
   const dialless = (t) => t.replace(/\s*\(?\+\d{1,4}\)?$/, "");
 
   // Education dropdowns name the degree from a fixed list. Your credential's own words pick exactly one kind, or none.
+  // An abbreviation counts only on its own ("D.B.A." holds no "B.A."), and "Master" or "Associate" only as a degree
+  // ("Master's", "Associate of Science"), never as a word in a certification's name.
   const DEGREE_KINDS = [
     ["phd", /\b(ph\.? ?d\.?|doctor(ate)? of philosophy)(?![a-z])/, /^(doctor of philosophy|ph\.? ?d)\b/],
-    ["mba", /\b(m\.? ?b\.? ?a\.?|master of business administration)(?![a-z])/, /^(master of business administration|m\.?b\.?a)\b/],
-    ["master", /\b(master'?s?|m\.s\.?|m\.a\.?|ms|ma|msc|m\.sc\.?|m\.ed\.?)(?![a-z])/, /^master'?s( degree)?$/],
-    ["bachelor", /\b(bachelor'?s?|b\.s\.?|b\.a\.?|bs|ba|bsc|b\.sc\.?|bba|b\.b\.a\.?)(?![a-z])/, /^bachelor'?s( degree)?$/],
-    ["associate", /\b(associate'?s?|a\.a\.s\.?|a\.a\.?|a\.s\.?|aas|a\.a\.t\.?)(?![a-z])/, /^associate'?s( degree)?$/],
+    ["mba", /(?<![a-z]\.)\b(m\.? ?b\.? ?a\.?|master of business administration)(?![a-z])/, /^(master of business administration|m\.?b\.?a)\b/],
+    ["master", /(?<![a-z]\.)\b(master'?s|master (of|in|degree)|m\.s\.?|m\.a\.?|ms|ma|msc|m\.sc\.?|m\.ed\.?)(?![a-z])/, /^master'?s( degree)?$/],
+    ["bachelor", /(?<![a-z]\.)\b(bachelor'?s?|b\.s\.?|b\.a\.?|bs|ba|bsc|b\.sc\.?|bba|b\.b\.a\.?)(?![a-z])/, /^bachelor'?s( degree)?$/],
+    ["associate", /(?<![a-z]\.)\b(associate'?s|associate (of|in|degree)|a\.a\.s\.?|a\.a\.?|a\.s\.?|aas|a\.a\.t\.?)(?![a-z])/, /^associate'?s( degree)?$/],
     ["high school", /\b(high school|ged|secondary school)(?![a-z])/, /^high school( diploma)?$/],
   ];
+  // A certificate, a licence or study that didn't end in the degree is never named as one. Neither is any doctorate
+  // other than a Ph.D., which no kind above covers.
+  const NOT_A_DEGREE =
+    /certif|licen[cs]|coursework|\btowards?\b|incomplete|unfinished|not complete|did not complete|non-?degree|some college|\babd\b|all but dissertation|candidate|\bms (office|excel|word|access|powerpoint|outlook|project|teams|sql)\b|microsoft/;
   function degreeKind(credential) {
     const t = norm(credential).toLowerCase().replace(/[\u2018\u2019]/g, "'");
+    if (NOT_A_DEGREE.test(t) || (/\bdoctor/.test(t) && !DEGREE_KINDS[0][1].test(t))) return null;
     let kinds = DEGREE_KINDS.filter(([, words]) => words.test(t)).map(([k]) => k);
     if (kinds.includes("mba")) kinds = kinds.filter((k) => k !== "master");
     if (kinds.includes("phd")) kinds = kinds.filter((k) => k !== "master");
     return kinds.length === 1 ? DEGREE_KINDS.find(([k]) => k === kinds[0])[2] : null;
   }
-  // The field of study: the record's own field, else what follows "in" ("Bachelor of Science in Computer Science") or
-  // a leading abbreviation ("A.A.S. Information Technology").
+  // The field of study: the record's own field, else what follows the degree's own name and "in" ("Bachelor of
+  // Science in Computer Science") or a leading abbreviation ("A.A.S. Information Technology"). A credential that isn't
+  // a degree, or one written with a minor, a concentration or anything after a comma, leaves the field to you, since
+  // it may name more than the major.
   function studyField(r) {
     const field = norm(r.field);
     if (field) return field;
     const d = norm(r.degree);
-    const m = d.match(/\bin\s+(.+)$/i) || d.match(/^(?:[a-z]{1,4}\.){1,4}\s+(.+)$/i) || d.match(/^(?:aas|aa|as|bs|ba|bsc|ms|ma|msc|mba)\s+(.+)$/i);
-    return m ? norm(m[1]) : "";
+    if (!degreeKind(d) || d.includes(",") || /\b(minors?|concentrations?|emphasis|track|speciali[sz]\w*|focus|double|dual)\b/i.test(d)) return "";
+    const named = d.match(/^(.+)\s+in\s+(.+)$/i);
+    if (named) return degreeKind(named[1]) ? norm(named[2]) : "";
+    const m = d.match(/^((?:[a-z]{1,4}\.){1,4}|aas|aa|as|bs|ba|bsc|ms|ma|msc|mba)\s+(.+)$/i);
+    return m && degreeKind(m[1]) ? norm(m[2]) : "";
   }
   const EDU_COMBOS = [
     ["school", /^(school|university|college|institution)( name)?$/],
@@ -1723,16 +1783,24 @@
       let wants = null,
         source = "profile",
         typed = "",
+        retry = "",
         accept = null;
-      if (lives === "state" && norm(p.country) && !inUS(p.country)) {
+      const abroad = lives === "state" && norm(p.country) && !inUS(p.country);
+      if (abroad && !stateCode(p.state)) {
         typed = "not";
         accept = (t) => NOT_IN_US.test(t.toLowerCase());
+      } else if (abroad) {
+        // A U.S. state beside a country ApplyPilot doesn't read as the U.S.: which one is right is yours to say.
+        if (isRequired(f)) block("unanswered_required", labelOf(f), f);
+        continue;
       } else if ((m && (m[0] === "country" || m[0] === "state")) || lives) {
         const key = m ? m[0] : lives;
         wants = variants(key, p[key]);
         const st = key === "state" ? stateCode(p.state) : "";
-        // A state is typed by its name: "GA" would also find "Michigan".
-        typed = st ? US_STATES[st] : norm(p[key]);
+        // A state is typed by its name, since "GA" would also find "Michigan", and then by its code for a list of codes.
+        // A country is typed by its own name, so "USA" still finds "United States".
+        typed = st ? US_STATES[st] : key === "country" ? countryName(p.country) : norm(p[key]);
+        retry = st;
         accept = (t) => wants.includes(dialless(t).toLowerCase());
       } else if (!m || m[0] === "city") {
         const a = answerFor(question(f) || lt.toLowerCase());
@@ -1749,7 +1817,7 @@
         accept = (t) => wants.includes(t.toLowerCase());
         typed = wants[0];
       } else if (!typed) continue;
-      const ok = await chooseOption(f, typed, accept);
+      const ok = (await chooseOption(f, typed, accept)) || (!!retry && retry !== typed && (await chooseOption(f, retry, accept)));
       if (ok) record(f, source);
       else if (isRequired(f)) block("unanswered_required", labelOf(f), f);
     }
@@ -1813,21 +1881,18 @@
       else block("unverifiable_choice", pair.label, pair.field);
     }
 
-    // 8. Required location autocomplete: one option that starts with the city and names the state.
+    // 8. Required location autocomplete: one option whose place is your city, in your state. "Union City" is not
+    // "Union", and "Graysonia" is not "Grayson".
     for (const f of locations) {
       if (!isRequired(f) || (isCombo(f) ? comboValue(f) : norm(f.value))) continue;
       const city = norm(p.city),
         st = stateCode(p.state);
-      const starts = (t) => !!city && t.toLowerCase().startsWith(city.toLowerCase());
-      const ok =
-        !!city &&
-        !!st &&
-        (await chooseOption(
-          f,
-          city,
-          (t) => starts(t) && (hasWord(t, st) || hasWord(t, US_STATES[st])),
-          (v) => starts(v),
-        ));
+      const place = (t) => !!city && norm(t.split(",")[0]).toLowerCase() === city.toLowerCase();
+      const inState = (t) => {
+        const rest = t.split(",").slice(1).join(",");
+        return hasWord(rest, st) || hasWord(rest, US_STATES[st]);
+      };
+      const ok = !!city && !!st && (await chooseOption(f, city, (t) => place(t) && inState(t), (v) => place(v)));
       if (ok) record(f, "profile");
       else block("unanswered_required", labelOf(f), f);
     }
@@ -2135,6 +2200,14 @@
         else relax.add("optional_sensitive_blank");
         continue;
       }
+      // A privacy-policy box ApplyPilot ticked under your setting is listed with the submission, not sent to you, however
+      // it is worded. One that no longer reads as only that, or under a setting since turned off, goes to you.
+      if (u.kind === "check" && u.els.length === 1 && !isEmpty && state.filled.get(u.first)?.source === "privacy_ack") {
+        u.skip = true;
+        if (allowPrivacy && privacyAckBox(u.first, root, job?.company)) relax.add("privacy_ack");
+        else add("attestation", unitLabel(u), u.first);
+        continue;
+      }
       const attest =
         u.kind === "pair"
           ? ATTEST_CONTROL.test(q)
@@ -2145,11 +2218,6 @@
               : attestationControl(u.first);
       if (attest) {
         u.skip = true;
-        // A privacy-policy box ApplyPilot ticked under your setting is listed with the submission, not sent to you.
-        if (allowPrivacy && u.kind === "check" && u.els.length === 1 && !isEmpty && privacyAckBox(u.first, root, job?.company) && state.filled.get(u.first)?.source === "privacy_ack") {
-          relax.add("privacy_ack");
-          continue;
-        }
         // An unticked optional consent box is fine; a typed signature or name always goes to you.
         const typed = u.kind === "single" && TEXTLIKE.includes(typeOf(u.first)) && !isCombo(u.first);
         if (typed || req || !isEmpty) add("attestation", unitLabel(u), u.first);

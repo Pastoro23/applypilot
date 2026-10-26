@@ -357,6 +357,18 @@ test('a privacy-policy box ticked under the setting is claimed only while the se
   await assert.rejects(saveSettings(db, OWNER, settings({ allowPrivacyAck: 'yes' }), NOW), UserFacingError);
 });
 
+test('a settings save from a dashboard tab that predates the privacy setting keeps the saved choice', async () => {
+  const { db } = setup();
+  const old = settings({ dailyCap: 5 });
+  delete (old as Record<string, unknown>).allowPrivacyAck;
+  await saveSettings(db, OWNER, settings({ allowPrivacyAck: false }), NOW);
+  assert.equal((await saveSettings(db, OWNER, old, NOW)).allowPrivacyAck, false);
+  assert.deepEqual(await loadSettings(db, OWNER), settings({ dailyCap: 5, allowPrivacyAck: false }));
+  await saveSettings(db, OWNER, settings({ allowPrivacyAck: true }), NOW);
+  await saveSettings(db, OWNER, old, NOW);
+  assert.equal((await loadSettings(db, OWNER)).allowPrivacyAck, true);
+});
+
 test('results: duplicates are acked and applied once; stale attempts change nothing', async () => {
   const { sqlite, db } = setup();
   addApp(sqlite, 'a1', ghUrl(1));
