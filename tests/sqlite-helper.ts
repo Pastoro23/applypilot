@@ -15,12 +15,19 @@ export function testDatabase() {
       return { results: [], meta: { changes: Number(result.changes) } };
     },
   });
+  let queue: Promise<unknown> = Promise.resolve();
   const db: SqlDatabase = {
     prepare: sql => wrap(sql),
-    async batch(statements) {
-      sqlite.exec('BEGIN');
-      try { const results: SqlResult[] = []; for (const s of statements) results.push(await s.run()); sqlite.exec('COMMIT'); return results; }
-      catch (e) { sqlite.exec('ROLLBACK'); throw e; }
+    // Batches run one at a time, like D1 transactions, even when callers start several at once.
+    batch(statements) {
+      const run = async () => {
+        sqlite.exec('BEGIN');
+        try { const results: SqlResult[] = []; for (const s of statements) results.push(await s.run()); sqlite.exec('COMMIT'); return results; }
+        catch (e) { sqlite.exec('ROLLBACK'); throw e; }
+      };
+      const result = queue.then(run);
+      queue = result.catch(() => undefined);
+      return result;
     },
   };
   return { sqlite, db };

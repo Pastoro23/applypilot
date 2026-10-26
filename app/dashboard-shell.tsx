@@ -1,10 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { FindJobsView } from "./find-jobs";
 import { buildAutofillProfile, educationFields, workFields } from "./profile-records";
 import { MasterResumePanel, TailorPanel, parseTailored, readJobLink } from "./tailoring";
 
-type View = "overview" | "profile" | "resumes" | "applications" | "accounts" | "extension";
+type View = "overview" | "profile" | "resumes" | "jobs" | "applications" | "accounts" | "extension";
 
 type User = { displayName: string; email: string };
 
@@ -96,6 +97,7 @@ const navItems: { id: View; label: string; icon: IconName }[] = [
   { id: "overview", label: "Overview", icon: "grid" },
   { id: "profile", label: "Application profile", icon: "person" },
   { id: "resumes", label: "Resume matcher", icon: "file" },
+  { id: "jobs", label: "Find jobs", icon: "search" },
   { id: "applications", label: "Applications", icon: "briefcase" },
   { id: "accounts", label: "Employer accounts", icon: "key" },
   { id: "extension", label: "Mac autofill", icon: "bolt" },
@@ -428,6 +430,23 @@ function SignedInDashboard() {
                   />
                 )}
                 {view === "resumes" && <ResumesView resumes={data.resumes} />}
+                {view === "jobs" && (
+                  <FindJobsView
+                    applications={data.applications}
+                    onAdded={(application) =>
+                      setData((current) =>
+                        current ? { ...current, applications: [application, ...current.applications.filter((item) => item.id !== application.id)] } : current,
+                      )
+                    }
+                    onUpdated={(application) =>
+                      setData((current) =>
+                        current
+                          ? { ...current, applications: current.applications.map((item) => (item.id === application.id ? { ...item, ...application } : item)) }
+                          : current,
+                      )
+                    }
+                  />
+                )}
                 {view === "applications" && (
                   <ApplicationsView
                     applications={data.applications}
@@ -1222,7 +1241,7 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   return payload;
 }
 
-type IconName = "grid" | "person" | "file" | "briefcase" | "key" | "bolt" | "shield" | "check" | "alert" | "gauge" | "send" | "plane" | "arrow";
+type IconName = "grid" | "person" | "file" | "briefcase" | "key" | "bolt" | "shield" | "check" | "alert" | "gauge" | "send" | "plane" | "arrow" | "search";
 
 function Icon({ name, className = "h-5 w-5" }: { name: IconName; className?: string }) {
   const paths: Record<IconName, ReactNode> = {
@@ -1239,6 +1258,7 @@ function Icon({ name, className = "h-5 w-5" }: { name: IconName; className?: str
     send: <><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></>,
     plane: <><path d="M2 16.5 22 3l-6 18-5-6-9 1.5Z"/><path d="m11 15 4-4"/></>,
     arrow: <><path d="M5 12h14M13 6l6 6-6 6"/></>,
+    search: <><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></>,
   };
   return <svg aria-hidden="true" className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
 }

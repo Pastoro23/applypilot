@@ -105,3 +105,52 @@ export const tailoredVersions = sqliteTable("tailored_versions", {
   revision: integer("revision").notNull(),
   createdAt: text("created_at").notNull(),
 });
+
+// Job boards the user follows (a company's Greenhouse, Lever or Ashby board).
+export const jobSources = sqliteTable(
+  "job_sources",
+  {
+    id: text("id").primaryKey(),
+    ownerEmail: text("owner_email").notNull(),
+    kind: text("kind").notNull(),
+    token: text("token").notNull(),
+    label: text("label").notNull().default(""),
+    lastCheckedAt: text("last_checked_at"),
+    lastError: text("last_error").notNull().default(""),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [uniqueIndex("job_sources_owner_board_unique").on(table.ownerEmail, table.kind, table.token)],
+);
+
+// What counts as a match: words that must appear in the title, places, and words that rule a job out.
+export const jobSearches = sqliteTable("job_searches", {
+  ownerEmail: text("owner_email").primaryKey(),
+  titleWords: text("title_words").notNull().default(""),
+  locations: text("locations").notNull().default(""),
+  excludeWords: text("exclude_words").notNull().default(""),
+  remoteOk: text("remote_ok").notNull().default("yes"),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+// Open jobs found on followed boards that match the search. status: new | queued | dismissed.
+export const foundJobs = sqliteTable(
+  "found_jobs",
+  {
+    id: text("id").primaryKey(),
+    ownerEmail: text("owner_email").notNull(),
+    sourceId: text("source_id").notNull(),
+    kind: text("kind").notNull(),
+    externalId: text("external_id").notNull(),
+    company: text("company").notNull(),
+    title: text("title").notNull(),
+    location: text("location").notNull().default(""),
+    url: text("url").notNull(),
+    postedAt: text("posted_at").notNull().default(""),
+    description: text("description").notNull().default(""),
+    score: integer("score").notNull().default(0),
+    status: text("status").notNull().default("new"),
+    applicationId: text("application_id"),
+    foundAt: text("found_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [uniqueIndex("found_jobs_owner_job_unique").on(table.ownerEmail, table.kind, table.externalId)],
+);

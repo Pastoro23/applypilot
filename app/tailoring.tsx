@@ -331,6 +331,7 @@ export function TailorPanel({
               ) : (
                 <>
                   <button onClick={() => setEditing(true)} disabled={busy !== ""} className={secondaryButton}>Edit</button>
+                  <button onClick={() => void downloadResumePdf(draft, application)} className={secondaryButton}>Resume (.pdf)</button>
                   <button onClick={() => void downloadResumeDocx(draft, application)} className={secondaryButton}>Resume (.docx)</button>
                   <button onClick={() => void downloadCoverLetterDocx(draft, application)} className={secondaryButton}>Cover letter (.docx)</button>
                 </>
@@ -518,6 +519,12 @@ async function saveBlob(blob: Blob, filename: string) {
   link.download = filename;
   link.click();
   URL.revokeObjectURL(url);
+}
+
+async function downloadResumePdf(tailored: TailoredResume, application: TailorableApplication) {
+  const { buildResumePdf } = await import("./resume-pdf");
+  const bytes = await buildResumePdf(tailored.resume);
+  await saveBlob(new Blob([bytes as BlobPart], { type: "application/pdf" }), `${fileBase(tailored, application)}_Resume.pdf`);
 }
 
 async function downloadResumeDocx(tailored: TailoredResume, application: TailorableApplication) {

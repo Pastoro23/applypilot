@@ -1,0 +1,169 @@
+import { fetchJobText, JobReadError } from "./job-fetch.ts";
+import { htmlToText, titleCase } from "./job-posting.ts";
+
+// Finds open jobs on the public Greenhouse, Lever and Ashby boards of companies the user follows.
+
+export type BoardKind = "greenhouse" | "lever" | "ashby";
+export type Board = { kind: BoardKind; token: string };
+export type BoardJob = {
+  externalId: string;
+  company: string;
+  title: string;
+  location: string;
+  url: string;
+  postedAt: string;
+  description: string;
+};
+export type JobSearch = { titleWords: string; locations: string; excludeWords: string; remoteOk: string };
+
+const MAX_BOARD_BYTES = 6 * 1024 * 1024;
+const TOKEN = /^[a-z0-9][a-z0-9._-]{0,99}$/i;
+
+// Accepts a board or job link (boards.greenhouse.io/acme, jobs.lever.co/acme/123, jobs.ashbyhq.com/acme)
+// or a short form such as "greenhouse:acme".
+export function parseBoard(raw: string): Board | null {
+  const text = raw.trim();
+  const short = text.match(/^(greenhouse|lever|ashby)\s*:\s*(\S+)$/i);
+  if (short) {
+    const token = short[2];
+    return TOKEN.test(token) ? { kind: short[1].toLowerCase() as BoardKind, token } : null;
+  }
+  let url: URL;
+  try {
+    url = new URL(/^https?:\/\//i.test(text) ? text : `https://${text}`);
+  } catch {
+    return null;
+  }
+  const host = url.hostname.toLowerCase();
+  const parts = url.pathname.split("/").filter(Boolean);
+  let board: Board | null = null;
+  if (/(^|\.)greenhouse\.io$/.test(host)) {
+    const token = url.searchParams.get("for") || (parts[0] === "embed" ? "" : parts[0]);
+    if (token) board = { kind: "greenhouse", token };
+  } else if (host === "jobs.lever.co" && parts[0]) board = { kind: "lever", token: parts[0] };
+  else if (host === "jobs.ashbyhq.com" && parts[0]) board = { kind: "ashby", token: parts[0] };
+  return board && TOKEN.test(board.token) ? board : null;
+}
+
+export function boardUrl(board: Board) {
+  const token = encodeURIComponent(board.token);
+  if (board.kind === "greenhouse") return `https://job-boards.greenhouse.io/${token}`;
+  if (board.kind === "lever") return `https://jobs.lever.co/${token}`;
+  return `https://jobs.ashbyhq.com/${token}`;
+}
+
+async function getJson(url: string) {
+  const body = await fetchJobText(url, "json", 15_000, MAX_BOARD_BYTES);
+  try {
+    return JSON.parse(body) as unknown;
+  } catch {
+    throw new JobReadError("The job board returned unreadable data.");
+  }
+}
+
+const str = (value: unknown) => (typeof value === "string" ? value.trim() : "");
+const records = (value: unknown) =>
+  Array.isArray(value) ? value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object") : [];
+const isoDate = (value: unknown) => {
+  const date = typeof value === "number" ? new Date(value) : typeof value === "string" ? new Date(value) : null;
+  return date && !Number.isNaN(date.getTime()) ? date.toISOString() : "";
+};
+const httpsUrl = (value: unknown) => {
+  try {
+    const url = new URL(str(value));
+    return url.protocol === "https:" ? url.href : "";
+  } catch {
+    return "";
+  }
+};
+
+export async function fetchBoardJobs(board: Board, label = ""): Promise<BoardJob[]> {
+  const token = encodeURIComponent(board.token);
+  const company = label || titleCase(board.token);
+  let jobs: BoardJob[];
+  if (board.kind === "greenhouse") {
+    const data = (await getJson(`https://boards-api.greenhouse.io/v1/boards/${token}/jobs`)) as { jobs?: unknown };
+    jobs = records(data?.jobs).map((job) => ({
+      externalId: String(job.id ?? ""),
+      company: str(job.company_name) || company,
+      title: str(job.title),
+      location: str((job.location as { name?: unknown } | undefined)?.name),
+      url: httpsUrl(job.absolute_url),
+      postedAt: isoDate(job.first_published ?? job.updated_at),
+      description: "", // Greenhouse lists omit descriptions; read when the job is added
+    }));
+  } else if (board.kind === "lever") {
+    const data = await getJson(`https://api.lever.co/v0/postings/${token}?mode=json`);
+    jobs = records(data).map((job) => {
+      const categories = (job.categories ?? {}) as { location?: unknown; allLocations?: unknown };
+      const lists = records(job.lists).map((list) => `${str(list.text)}\n${htmlToText(str(list.content))}`);
+      return {
+        externalId: str(job.id),
+        company,
+        title: str(job.text),
+        location: str(categories.location) || (Array.isArray(categories.allLocations) ? categories.allLocations.map(str).join("; ") : ""),
+        url: httpsUrl(job.hostedUrl),
+        postedAt: isoDate(job.createdAt),
+        description: [str(job.descriptionPlain) || htmlToText(str(job.description)), ...lists, str(job.additionalPlain)]
+          .filter(Boolean)
+          .join("\n\n"),
+      };
+    });
+  } else {
+    const data = (await getJson(`https://api.ashbyhq.com/posting-api/job-board/${token}`)) as { jobs?: unknown };
+    jobs = records(data?.jobs)
+      .filter((job) => job.isListed !== false)
+      .map((job) => ({
+        externalId: str(job.id),
+        company,
+        title: str(job.title),
+        location: [str(job.location), job.isRemote === true ? "Remote" : ""].filter(Boolean).join(" · "),
+        url: httpsUrl(job.jobUrl),
+        postedAt: isoDate(job.publishedAt),
+        description: str(job.descriptionPlain) || htmlToText(str(job.descriptionHtml)),
+      }));
+  }
+  return jobs.filter((job) => job.externalId && job.title && job.url).map((job) => ({
+    ...job,
+    title: job.title.slice(0, 200),
+    location: job.location.slice(0, 200),
+    company: job.company.slice(0, 160),
+    description: job.description.slice(0, 20000),
+  }));
+}
+
+export function phrases(text: string) {
+  return text
+    .split(/[,;\n]/)
+    .map((part) => part.toLowerCase().replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+}
+
+// Whole-word phrase match, so "tech" doesn't match "technology" and "IT" doesn't match "with".
+function has(haystack: string, phrase: string) {
+  const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "\\s+");
+  return new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`, "i").test(haystack);
+}
+
+// Returns a 0-100 score for a job that matches the search, or null if it doesn't.
+export function scoreJob(job: Pick<BoardJob, "title" | "location" | "postedAt">, search: JobSearch, now = Date.now()) {
+  const title = job.title.toLowerCase();
+  const location = job.location.toLowerCase();
+  if (phrases(search.excludeWords).some((word) => has(title, word))) return null;
+  const titleWords = phrases(search.titleWords);
+  const titleHit = titleWords.length === 0 || titleWords.some((word) => has(title, word));
+  if (!titleHit) return null;
+  const places = phrases(search.locations);
+  const remote = /remote|anywhere/i.test(location);
+  const placeHit = places.some((place) => has(location, place));
+  const remoteHit = search.remoteOk === "yes" && remote;
+  if (places.length && location && !placeHit && !remoteHit) return null;
+  let score = titleWords.length ? 55 : 30;
+  if (placeHit) score += 30;
+  else if (remoteHit) score += 25;
+  else if (!places.length) score += 20;
+  else score += 5; // no location listed: possible match, ranked lower
+  const age = job.postedAt ? (now - new Date(job.postedAt).getTime()) / 86_400_000 : Infinity;
+  score += age <= 7 ? 15 : age <= 30 ? 8 : 0;
+  return Math.min(100, score);
+}

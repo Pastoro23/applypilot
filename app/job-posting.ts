@@ -43,7 +43,7 @@ export function decodeEntities(text: string) {
   });
 }
 
-function titleCase(slug: string) {
+export function titleCase(slug: string) {
   return slug.replace(/[-_]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 

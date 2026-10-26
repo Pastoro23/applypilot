@@ -21,7 +21,7 @@ export function checkedJobUrl(raw: string) {
   return url;
 }
 
-export async function fetchJobText(raw: string, accept: 'json' | 'html', timeoutMs = TIMEOUT_MS) {
+export async function fetchJobText(raw: string, accept: 'json' | 'html', timeoutMs = TIMEOUT_MS, maxBytes = MAX_JOB_BYTES) {
   let url = checkedJobUrl(raw);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -45,7 +45,7 @@ export async function fetchJobText(raw: string, accept: 'json' | 'html', timeout
         await response.body?.cancel();
         throw new JobReadError('That link did not return a readable job posting. Paste the description instead.');
       }
-      if (Number(response.headers.get('content-length') || 0) > MAX_JOB_BYTES) {
+      if (Number(response.headers.get('content-length') || 0) > maxBytes) {
         await response.body?.cancel();
         throw new JobReadError('The job page is too large. Paste the description instead.');
       }
@@ -57,7 +57,7 @@ export async function fetchJobText(raw: string, accept: 'json' | 'html', timeout
           const chunk = await reader.read();
           if (chunk.done) break;
           size += chunk.value.byteLength;
-          if (size > MAX_JOB_BYTES) throw new JobReadError('The job page is too large. Paste the description instead.');
+          if (size > maxBytes) throw new JobReadError('The job page is too large. Paste the description instead.');
           body += decoder.decode(chunk.value, { stream: true });
         }
       } catch (error) { await reader.cancel(); throw error; }
