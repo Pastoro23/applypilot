@@ -3,7 +3,7 @@
 // assistant() is the popup's manual mode and never presses Submit. The batch runner uses the rest; only
 // pressSubmit() ever clicks a Submit button, once, after the rules that can be checked in the page hold again.
 (() => {
-  const VERSION = "3.1.0";
+  const VERSION = "3.1.1";
   const previous = globalThis.__applypilot;
   if (previous && previous.version === VERSION) return;
 
@@ -497,7 +497,7 @@
       submitSelector: ["input#submit_app", "button[type=submit]"],
       confirmUrl: /\/confirmation(\b|\/|\?|$)/i,
       errorSelectors: [".field-error", ".error", "[aria-invalid=true]", "[role=alert]"],
-      dropZone: ["[class*='drop-zone' i]", "[class*='dropzone' i]"],
+      dropZone: ["[class*='drop-zone' i]", "[class*='dropzone' i]", ".file-upload"],
     },
     lever: {
       formRoot: ["form#application-form", "form[action$='/apply']"],
@@ -1520,6 +1520,22 @@
   }
   const exactTextIn = (box, name) => Array.from(box.querySelectorAll("*")).some((e) => norm(e.innerText) === name);
 
+  // A file input you can see shows its own file name. A hidden one (Greenhouse's newer form, most drop zones) only
+  // counts once the page's own widget shows the name: setting input.files proves nothing if the page ignored it.
+  function nativeFileShown(f) {
+    if (!visible(f)) return false;
+    const r = f.getBoundingClientRect();
+    return r.width >= 8 && r.height >= 8;
+  }
+  // The name may show in the upload box or anywhere in the question it belongs to (Greenhouse's newer form).
+  function resumeShown(input, root, name) {
+    if (!name) return false;
+    const group = input.closest("[role=group],fieldset");
+    return [fieldBox(input, root), group && root.contains(group) ? group : null].some((b) => b && textOf(b).includes(name));
+  }
+  function resumeTaken(input, root, name) {
+    return (nativeFileShown(input) && input.files?.[0]?.name === name) || resumeShown(input, root, name);
+  }
   async function attachResume(root, adapter, resume, out, block) {
     const inputs = resumeInputs(root);
     if (!inputs.length) return block("resume_field_missing"), null;
@@ -1541,7 +1557,7 @@
       // Only drop when the change event alone didn't take, so a widget that handles both doesn't get two files.
       const zone = dropZoneFor(input, root, adapter);
       const box = fieldBox(input, root);
-      if (zone && !(await waitFor(() => textOf(box).includes(resume.name), 1000, 100)))
+      if (zone && !(await waitFor(() => textOf(box).includes(resume.name), 1500, 100)))
         zone.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: dt }));
     }
     await sleep(300);
@@ -1549,7 +1565,7 @@
     let calm = 0;
     const settled = await waitFor(
       () => {
-        const ok = (input.files?.[0]?.name === resume.name || textOf(box).includes(resume.name)) && !busyIn(box);
+        const ok = resumeTaken(input, root, resume.name) && !busyIn(box);
         calm = ok ? calm + 1 : 0;
         return calm >= 2;
       },
@@ -1589,29 +1605,15 @@
     return fixed;
   }
 
-  async function fill({ profile, resume, coverLetter = "", ats, company = "", usPosting = false, allowPrivacyAck = false } = {}) {
-    const out = { filled: [], blockers: [], resumeInputPath: "" };
-    state.fillFlagged = [];
+  // One pass over the form: everything after the resume. It only fills what is empty (and corrects your name, email
+  // and phone), so running it again after the page wiped some answers redoes just those.
+  async function fillPass(root, resumeInput, { p, company, usPosting, allowPrivacyAck, coverLetter }) {
+    const blockers = [],
+      flags = [];
     const block = (code, label, el) => {
-      out.blockers.push(B(code, label));
-      if (el) state.fillFlagged.push(el);
+      blockers.push(B(code, label));
+      if (el) flags.push(el);
     };
-    if (alreadyClicked()) {
-      block(clickedCode());
-      return out;
-    }
-    const adapter = adapterFor(ats);
-    const root = currentRoot(adapter);
-    if (!root) {
-      block("form_not_found");
-      return out;
-    }
-    const p = profile || {};
-    state.filled = new Map();
-
-    // 1. This job's resume, then let any resume parser on the page finish.
-    const resumeInput = await attachResume(root, adapter, resume, out, block);
-    await quiet(root, 1000, 5000);
 
     // 2. Cover letter: a text box is filled from the approved letter; a required file upload goes to you.
     const letter = String(coverLetter || "").trim();
@@ -1832,15 +1834,136 @@
       else block("unanswered_required", labelOf(f), f);
     }
 
-    // 9. Identity pass: a resume parser may have rewritten name, email or phone, or a page that re-rendered after the
-    // dropdowns above may have cleared them. One more look after the page settles catches a late change.
-    for (let pass = 0; pass < 3; pass++) {
-      await quiet(root, pass === 2 ? 1500 : 1000, pass === 2 ? 6000 : 5000);
-      if (!identityPass(root, p, recordRoots) && pass > 0) break;
-    }
+    // 9. Identity pass: a resume parser may have rewritten name, email or phone.
+    identityPass(root, p, recordRoots);
+    return { blockers, flags };
+  }
 
-    out.filled = Array.from(state.filled.values(), ({ label, type, required, value, source }) => ({ label, type, required, value, source })).slice(0, 60);
-    return out;
+  // Whether an answer ApplyPilot gave is still what the page shows. The audit uses the same test (R6).
+  function held(entry, root) {
+    const el = entry.el;
+    if (!el.isConnected || !root.contains(el)) return false;
+    const now = readFor(el);
+    return entry.phone ? digits(now).endsWith(entry.phone) || (digits(now).length >= 7 && entry.phone.endsWith(digits(now))) : fnv1a(now) === entry.hash;
+  }
+  function blankNow(el) {
+    const now = readFor(el);
+    if (el.tagName === "INPUT" && ["checkbox", "radio"].includes(typeOf(el))) return now !== "1";
+    if (!["INPUT", "SELECT", "TEXTAREA"].includes(el.tagName)) return now !== "true";
+    return !norm(now);
+  }
+  // Answers the page took back: an element it replaced, a field it emptied, or your name, email or phone rewritten
+  // (a resume parser does that). A different answer the page chose itself is left for the audit to report.
+  function lostAnswers(root) {
+    const lost = [];
+    for (const entry of state.filled.values()) {
+      // A file input may be emptied by its own widget once the upload is done; only a replaced one counts.
+      if (held(entry, root) || (entry.type === "file" && entry.el.isConnected && root.contains(entry.el))) continue;
+      const el = entry.el;
+      if (!el.isConnected || !root.contains(el) || blankNow(el) || profileField(el, IDENTITY)) lost.push(entry);
+    }
+    return lost;
+  }
+  // The element a re-render put in place of one ApplyPilot filled: same id, or same name (and value, for a box).
+  function twinOf(el, root) {
+    let sel = "";
+    if (el.id) sel = `#${CSS.escape(el.id)}`;
+    else if (el.getAttribute("name")) {
+      sel = `${el.tagName.toLowerCase()}[name="${CSS.escape(el.getAttribute("name"))}"]`;
+      if (["checkbox", "radio"].includes(typeOf(el))) sel += `[value="${CSS.escape(el.value)}"]`;
+    }
+    const hits = sel ? Array.from(root.querySelectorAll(sel)).filter((x) => x !== el) : [];
+    return hits.length === 1 ? hits[0] : null;
+  }
+
+  async function fill({ profile, resume, coverLetter = "", ats, company = "", usPosting = false, allowPrivacyAck = false, budgetMs = 150000 } = {}) {
+    const deadline = Date.now() + Math.max(30000, Number(budgetMs) || 0);
+    const out = { filled: [], blockers: [], resumeInputPath: "" };
+    state.fillFlagged = [];
+    let resumeBlockers = [],
+      resumeFlags = [];
+    const resumeBlock = (code, label, el) => {
+      resumeBlockers.push(B(code, label));
+      if (el) resumeFlags.push(el);
+    };
+    const finish = (pass) => {
+      out.blockers = [...resumeBlockers, ...(pass?.blockers || [])];
+      state.fillFlagged = [...resumeFlags, ...(pass?.flags || [])];
+      out.filled = Array.from(state.filled.values(), ({ label, type, required, value, source }) => ({ label, type, required, value, source })).slice(0, 60);
+      return out;
+    };
+    if (alreadyClicked()) {
+      resumeBlock(clickedCode());
+      return finish();
+    }
+    const adapter = adapterFor(ats);
+    let root = currentRoot(adapter);
+    if (!root) {
+      resumeBlock("form_not_found");
+      return finish();
+    }
+    const opts = { p: profile || {}, company, usPosting, allowPrivacyAck, coverLetter };
+    state.filled = new Map();
+
+    // 1. This job's resume, then let any resume parser on the page finish. A site that reads the resume to fill the
+    // form from it answers over the network, so that gets longer to land before anything is typed.
+    let resumeInput = await attachResume(root, adapter, resume, out, resumeBlock);
+    const taken = !!resumeInput && state.filled.has(resumeInput);
+    await quiet(root, taken ? 2500 : 1000, taken ? 15000 : 5000);
+
+    let pass = await fillPass(root, resumeInput, opts);
+
+    // 10. Settle, then check that every answer is still there. A page that re-rendered (after a dropdown, or after it
+    // read the resume) can wipe what was typed; those answers are given again, at most twice. Two calm looks in a
+    // row end it, so a late wipe is still caught.
+    let refills = 0,
+      calm = 0;
+    while (Date.now() < deadline - 5000) {
+      const before = currentRoot(adapter);
+      if (!before) break;
+      await quiet(before, calm ? 2000 : 1500, Math.max(1000, Math.min(calm ? 6000 : 12000, deadline - Date.now() - 5000)));
+      root = currentRoot(adapter);
+      if (!root) break;
+      const lost = lostAnswers(root);
+      if (!lost.length) {
+        if (++calm >= 2) break;
+        continue;
+      }
+      if (refills >= 2 || Date.now() > deadline - 30000) break;
+      refills++;
+      calm = 0;
+      // A replaced element that still shows ApplyPilot's answer is the same answer; anything else is given again below.
+      const replaced = [];
+      for (const entry of lost) {
+        if (entry.el.isConnected && root.contains(entry.el)) continue;
+        const twin = twinOf(entry.el, root);
+        if (twin && !state.filled.has(twin) && fnv1a(readFor(twin)) === entry.hash) {
+          state.filled.delete(entry.el);
+          record(twin, entry.source, readFor(twin));
+        } else replaced.push([entry.el, twin]);
+      }
+      // The resume too: attached again if the page dropped it, or followed to a new input that still shows it.
+      const inputs = resumeInputs(root);
+      if (resume?.name && inputs.length === 1) {
+        const now = inputs[0];
+        if (!resumeTaken(now, root, resume.name)) {
+          resumeBlockers = [];
+          resumeFlags = [];
+          if (resumeInput) state.filled.delete(resumeInput);
+          resumeInput = await attachResume(root, adapter, resume, out, resumeBlock);
+          if (resumeInput && state.filled.has(resumeInput)) await quiet(root, 2500, 15000);
+        } else if (now !== resumeInput) {
+          if (resumeInput) state.filled.delete(resumeInput);
+          now.dataset.applypilotFile = resume.name;
+          record(now, "resume");
+          resumeInput = now;
+        }
+      }
+      pass = await fillPass(root, resumeInput, opts);
+      // An answer given again to the new element replaces the old one; one that couldn't be stays, so the audit reports it.
+      for (const [old, twin] of replaced) if (twin && state.filled.has(twin)) state.filled.delete(old);
+    }
+    return finish(pass);
   }
 
   // ---- audit (R3-R8) ---------------------------------------------------------------------------
@@ -2081,7 +2204,8 @@
     const adapter = adapterFor(job?.ats);
     const allowInvisible = settings?.allowInvisibleCaptcha !== false;
     const allowOptional = settings?.allowOptionalSensitiveBlank !== false;
-    const allowPrivacy = settings?.allowPrivacyAck !== false;
+    // Only a server that offers the privacy-box setting sends it; without it the box is left to you.
+    const allowPrivacy = settings?.allowPrivacyAck === true;
     const blockers = [],
       flagged = [],
       relax = new Set();
@@ -2152,7 +2276,9 @@
         }
         // An unticked optional consent box is fine; a typed signature or name always goes to you.
         const typed = u.kind === "single" && TEXTLIKE.includes(typeOf(u.first)) && !isCombo(u.first);
-        if (typed || req || !isEmpty) add("attestation", unitLabel(u), u.first);
+        if (!typed && u.kind === "check" && u.els.length === 1 && (req || !isEmpty) && privacyAckBox(u.first, root, job?.company))
+          add("attestation", null, u.first, `The privacy-policy box is left for you${allowPrivacy ? "" : " (ApplyPilot's privacy-box setting is off)"}: ${clip(unitLabel(u), 120)}`);
+        else if (typed || req || !isEmpty) add("attestation", unitLabel(u), u.first);
       }
     }
 
@@ -2205,13 +2331,7 @@
     const tracked = new Set();
     for (const entry of state.filled.values()) {
       tracked.add(entry.el);
-      const el = entry.el;
-      let held = el.isConnected && root.contains(el);
-      if (held) {
-        const now = readFor(el);
-        held = entry.phone ? digits(now).endsWith(entry.phone) || (digits(now).length >= 7 && entry.phone.endsWith(digits(now))) : fnv1a(now) === entry.hash;
-      }
-      if (!held) add("value_reset", entry.label, el.isConnected ? el : null);
+      if (!held(entry, root)) add("value_reset", entry.label, entry.el.isConnected ? entry.el : null);
     }
     for (const el of root.querySelectorAll("[data-applypilot-filled]"))
       if (!tracked.has(el) && fnv1a(readFor(el)) !== el.getAttribute("data-applypilot-filled")) add("value_reset", labelOf(el), el);
@@ -2228,6 +2348,8 @@
       const want = job?.resume || {};
       if (f) {
         if (f.name !== want.name || f.size !== want.size) add("resume_mismatch", null, resumeInput);
+        // A hidden input holding the file proves nothing until the page's own widget shows it.
+        else if (!nativeFileShown(resumeInput) && !resumeShown(resumeInput, root, want.name)) add("resume_not_attached", null, resumeInput);
         else {
           res.resumeFile = f;
           res.verifiedBy = "file";

@@ -724,7 +724,7 @@ test('relaxations go into the claim only while the matching setting is on', asyn
     fingerprint: 'fp-1', blockers: [], report: [], submit: { path: '#s', label: 'Submit application' },
     relaxations: ['invisible_captcha', 'optional_sensitive_blank', 'privacy_ack'],
   });
-  const on = await setup();
+  const on = await setup({ settings: { auto: { lever: true }, allowPrivacyAck: true } });
   on.scripting.handlers.audit = relaxed;
   await on.runner.recover();
   await on.runner.run({ countdown: false });
@@ -737,6 +737,40 @@ test('relaxations go into the claim only while the matching setting is on', asyn
   assert.equal(off.bridge.sent.length, 0);
   const [r] = await off.results();
   assert.deepEqual(r.reasons.map((x: Json) => x.code), ['captcha', 'demographic', 'attestation']);
+});
+
+test('a dashboard that never sent the privacy-box setting leaves the box to you', async () => {
+  // An older dashboard's settings have no allowPrivacyAck: the fill step is told no, and a ticked box still stops.
+  const s = await setup({ settings: { auto: { lever: true } } });
+  let seen: unknown = null;
+  const fill = s.scripting.handlers.fill;
+  s.scripting.handlers.fill = (args: Json, tabId: number) => {
+    seen = args.allowPrivacyAck;
+    return fill(args, tabId);
+  };
+  s.scripting.handlers.audit = () => ({
+    fingerprint: 'fp-1', blockers: [], report: [], submit: { path: '#s', label: 'Submit application' }, relaxations: ['privacy_ack'],
+  });
+  await s.runner.recover();
+  await s.runner.run({ countdown: false });
+  assert.equal(seen, false);
+  assert.equal(s.bridge.sent.length, 0);
+  const [r] = await s.results();
+  assert.deepEqual(r.reasons.map((x: Json) => x.code), ['attestation']);
+  assert.match(r.reasons[0].text, /privacy-policy box is left for you/);
+});
+
+test('the fill step gets a time budget inside the runner\'s own wait', async () => {
+  const s = await setup();
+  let budget: unknown = null;
+  const fill = s.scripting.handlers.fill;
+  s.scripting.handlers.fill = (args: Json, tabId: number) => {
+    budget = args.budgetMs;
+    return fill(args, tabId);
+  };
+  await s.runner.recover();
+  await s.runner.run({ countdown: false });
+  assert.equal(budget, 150_000);
 });
 
 test('the fill step is told whether a privacy-policy box may be ticked', async () => {

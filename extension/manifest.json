@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ApplyPilot Application Assistant",
-  "version": "3.1.0",
+  "version": "3.1.1",
   "description": "Fills approved answers and attaches each job's own resume. Submits only applications you approved in ApplyPilot and stops for anything that needs you.",
   "permissions": ["activeTab", "scripting", "storage", "unlimitedStorage"],
   "host_permissions": [

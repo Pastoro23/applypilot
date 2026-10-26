@@ -5,7 +5,7 @@ import { HOST_PATTERNS, isAllowedUrl, isAts, parseAtsUrl } from "./ats.js";
 
 export const DASHBOARD_ORIGIN = "https://applypilot-hub.amused-bream-5718.chatgpt.site";
 export const DASHBOARD_URL = `${DASHBOARD_ORIGIN}/`;
-export const EXTENSION_VERSION = "3.1.0";
+export const EXTENSION_VERSION = "3.1.1";
 
 const SECOND = 1000;
 const MINUTE = 60 * SECOND;
@@ -22,7 +22,10 @@ export const LIMITS = {
 const TIMES = {
   load: 45 * SECOND,
   form: 20 * SECOND,
-  fill: 90 * SECOND,
+  // The page gets fillBudget; the rest is margin for the call itself. Filling settles and checks again after a page
+  // that re-renders, so a slow form can use most of it.
+  fill: 180 * SECOND,
+  fillBudget: 150 * SECOND,
   audit: 30 * SECOND,
   quick: 10 * SECOND,
   supervised: 30 * MINUTE,
@@ -135,7 +138,8 @@ export function cleanSettings(s) {
     // Informational: the server decides at claim time. Defaults match the server's (Peter chose "Skip both").
     allowInvisibleCaptcha: o.allowInvisibleCaptcha !== false,
     allowOptionalSensitiveBlank: o.allowOptionalSensitiveBlank !== false,
-    allowPrivacyAck: o.allowPrivacyAck !== false,
+    // Only a dashboard that offers the privacy-box setting sends it; an older one never asked, so the box stays yours.
+    allowPrivacyAck: o.allowPrivacyAck === true,
     dailyCap: Number.isSafeInteger(o.dailyCap) ? o.dailyCap : 10,
     auto: { greenhouse: auto.greenhouse === true, lever: auto.lever === true, ashby: auto.ashby === true },
   };
@@ -921,8 +925,8 @@ export function createRunner(deps, opts = {}) {
       add({ code: "captcha", text: "The page shows a CAPTCHA." });
     if (rel.includes("optional_sensitive_blank") && settings.allowOptionalSensitiveBlank === false)
       add({ code: "demographic", text: "A demographic or personal question needs you" });
-    if (rel.includes("privacy_ack") && settings.allowPrivacyAck === false)
-      add({ code: "attestation", text: "The form asks you to certify or sign something." });
+    if (rel.includes("privacy_ack") && settings.allowPrivacyAck !== true)
+      add({ code: "attestation", text: "The privacy-policy box is left for you (ApplyPilot's privacy-box setting is off)." });
     return out;
   }
 
@@ -1199,7 +1203,8 @@ export function createRunner(deps, opts = {}) {
           ats: j.ats,
           company: j.company,
           usPosting: j.usPosting === true,
-          allowPrivacyAck: rec.settings?.allowPrivacyAck !== false,
+          allowPrivacyAck: rec.settings?.allowPrivacyAck === true,
+          budgetMs: TIMES.fillBudget,
         },
         TIMES.fill,
       );
