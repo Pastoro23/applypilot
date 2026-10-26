@@ -1,4 +1,4 @@
-ApplyPilot Application Assistant 3.1 for Google Chrome on macOS
+ApplyPilot Application Assistant 3.2 for Google Chrome on macOS
 
 Install
 1. Double-click the ZIP file to unzip it.

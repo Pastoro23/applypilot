@@ -18,12 +18,12 @@ test('downloadable extension holds every file in extension/, byte for byte, and 
   const zip = await JSZip.loadAsync(readFileSync(new URL('../public/applypilot-extension.zip', import.meta.url)));
   assert.deepEqual(Object.keys(zip.files).sort(), files);
   for (const name of files) assert.deepEqual(await zip.file(name)!.async('nodebuffer'), read(name), name);
-  assert.equal(JSON.parse(await zip.file('manifest.json')!.async('string')).version, '3.1.1');
+  assert.equal(JSON.parse(await zip.file('manifest.json')!.async('string')).version, '3.2.0');
 });
 
-test('manifest 3.1.1 asks only for what the runner needs', () => {
+test('manifest 3.2.0 asks only for what the runner needs', () => {
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, '3.1.1');
+  assert.equal(manifest.version, '3.2.0');
   assert.deepEqual(manifest.permissions, ['activeTab', 'scripting', 'storage', 'unlimitedStorage']);
   assert.deepEqual(manifest.host_permissions, HOSTS);
   assert.deepEqual(manifest.background, { service_worker: 'background.js', type: 'module' });

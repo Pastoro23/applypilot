@@ -1,8 +1,9 @@
 // Stand-in for react-select v5 on Greenhouse's newer form (scripts/fixtures/greenhouse-remix.html), served as
 // /assets/greenhouse-remix.js. The menu opens inside the field's container (role=listbox, aria-controls on the
 // input while open); typing filters it; the screen-reader live region counts the results; an option is chosen
-// on click, shown as .select__single-value, and copied into the hidden required input. Location and School
-// are searched as you type and show nothing before that. The input loses any typed text when it loses focus.
+// on click and shown as .select__single-value. The hidden required input is there only while nothing is chosen, as
+// react-select renders it. Location and School are searched as you type and show nothing before that. The input
+// loses any typed text when it loses focus. greenhouse-real.jsx is the same form built from the real library.
 const STATES = [
   "Alabama", "Alaska", "Arizona", "Arkansas", "California", "Colorado", "Connecticut", "Delaware", "Florida", "Georgia",
   "Hawaii", "Idaho", "Illinois", "Indiana", "Iowa", "Kansas", "Kentucky", "Louisiana", "Maine", "Maryland",
@@ -41,7 +42,6 @@ function wire(input) {
   const shell = input.closest(".select-shell");
   const log = shell.querySelector("[role=log]");
   const valueBox = shell.querySelector(".select__value-container");
-  const proxy = shell.querySelector("input[aria-hidden=true]");
   const listId = `react-select-${input.id}-listbox`;
   const async = Object.hasOwn(SEARCH, input.id);
   let menu = null;
@@ -57,7 +57,7 @@ function wire(input) {
     single.className = "select__single-value";
     single.textContent = text;
     valueBox.prepend(single);
-    if (proxy) proxy.value = text;
+    shell.querySelector(":scope > input[aria-hidden=true]")?.remove();
     input.value = "";
     log.textContent = `option ${text}, selected.`;
     close();
@@ -115,7 +115,8 @@ function wire(input) {
 }
 for (const input of document.querySelectorAll("input.select__input[role=combobox]")) wire(input);
 
-// The resume widget: a chosen file shows its name and a Remove button in place of the buttons, as Greenhouse does.
+// The resume widget: a chosen file shows its name and a Remove button in place of the buttons and the file input,
+// which leave the page with them, as Greenhouse's React widget does.
 // A test can set window.__remix before filling:
 //   ignoreChange: the hidden input ignores a change event a script sent (a real file picker's still counts);
 //   acceptDrop: with ignoreChange, a file dropped on the upload box is taken instead;
@@ -127,7 +128,7 @@ const resumeInput = document.getElementById("resume");
 const cfg = () => window.__remix || {};
 function showFile(name) {
   const wrap = upload.querySelector(".file-upload__wrapper");
-  wrap.querySelector(".button-container").style.display = "none";
+  wrap.querySelector(".button-container")?.remove();
   wrap.querySelector(".file-upload__filename")?.remove();
   const row = document.createElement("div");
   row.className = "file-upload__filename";
@@ -155,8 +156,14 @@ function clearField(el) {
       ph.textContent = "Select...";
       box.prepend(ph);
     }
-    const proxy = shell.querySelector("input[aria-hidden=true]");
-    if (proxy) proxy.value = "";
+    if (el.getAttribute("aria-required") === "true" && !shell.querySelector(":scope > input[aria-hidden=true]")) {
+      const proxy = document.createElement("input");
+      proxy.required = true;
+      proxy.tabIndex = -1;
+      proxy.setAttribute("aria-hidden", "true");
+      proxy.value = "";
+      shell.append(proxy);
+    }
     el.value = "";
   } else if (el.type === "checkbox" || el.type === "radio") el.checked = false;
   else if (el.type !== "file") el.value = "";
@@ -171,7 +178,6 @@ function parse() {
       for (const a of [...el.attributes]) if (a.name.startsWith("data-applypilot")) el.removeAttribute(a.name);
       el.removeAttribute("style");
     }
-    fresh.querySelector(".button-container").style.display = "none";
     old.replaceWith(fresh);
     for (const el of fresh.querySelectorAll("input,select,textarea")) clearField(el);
     for (const input of fresh.querySelectorAll("input.select__input[role=combobox]")) wire(input);

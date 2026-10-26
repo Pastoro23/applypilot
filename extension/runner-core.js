@@ -5,7 +5,7 @@ import { HOST_PATTERNS, isAllowedUrl, isAts, parseAtsUrl } from "./ats.js";
 
 export const DASHBOARD_ORIGIN = "https://applypilot-hub.amused-bream-5718.chatgpt.site";
 export const DASHBOARD_URL = `${DASHBOARD_ORIGIN}/`;
-export const EXTENSION_VERSION = "3.1.1";
+export const EXTENSION_VERSION = "3.2.0";
 
 const SECOND = 1000;
 const MINUTE = 60 * SECOND;

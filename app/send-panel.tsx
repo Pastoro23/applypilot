@@ -234,7 +234,7 @@ export function ReadyToSendPanel({
         return;
       }
       if (!connected) {
-        setNotice(["Approved. Open this page in Chrome on your Mac with Application Assistant 3.1 to send.", ...intro].join(" "));
+        setNotice(["Approved. Open this page in Chrome on your Mac with Application Assistant 3.2 to send.", ...intro].join(" "));
         return;
       }
       try {
@@ -361,7 +361,7 @@ export function ReadyToSendPanel({
         )}
         {bridge.status === "missing" && waiting.length > 0 && (
           <Banner tone="amber" action={<button onClick={onOpenExtension} className={smallButton}>Set up</button>}>
-            {plural(waiting.length, "application is", "applications are")} approved. Open this page in Chrome on your Mac with Application Assistant 3.1 to send.
+            {plural(waiting.length, "application is", "applications are")} approved. Open this page in Chrome on your Mac with Application Assistant 3.2 to send.
           </Banner>
         )}
       </div>
@@ -539,7 +539,7 @@ function Banner({ tone, action, children }: { tone: "blue" | "amber" | "slate"; 
 }
 
 export function bridgeStatusText(bridge: Pick<ExtensionBridge, "status" | "version" | "held">, waiting = 0) {
-  if (bridge.status === "checking") return "Looking for Application Assistant 3.1…";
+  if (bridge.status === "checking") return "Looking for Application Assistant 3.2…";
   if (bridge.status === "missing") return "Not detected: install or reload the extension";
   return `Connected · ${bridge.version}${waiting ? ` · ${waiting} waiting` : ""}`;
 }

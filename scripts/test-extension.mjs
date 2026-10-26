@@ -257,6 +257,8 @@ function bundle(name) {
 const ASSETS = {
   "/assets/combobox.js": () => fixture("combobox.js"),
   "/assets/greenhouse-remix.js": () => fixture("greenhouse-remix.js"),
+  "/assets/greenhouse-real.js": () => bundle("greenhouse-real.jsx"),
+  "/assets/odd-combobox.js": () => fixture("odd-combobox.js"),
   "/assets/react-form.js": () => bundle("react-form.js"),
   "/assets/bridge-hook.js": () => bundle("bridge-hook.js"),
 };
@@ -288,24 +290,25 @@ async function open(url, pages) {
 }
 
 // The runner passes the approved job's company and whether its posting is in the U.S.; these fixtures are.
-const findAndFill = (p, ats, { profile = PROFILE, resume = RESUME, coverLetter = COVER, company = "Acme Example", usPosting = true, allowPrivacyAck = false } = {}) =>
+const findAndFill = (p, ats, { profile = PROFILE, resume = RESUME, coverLetter = COVER, company = "Acme Example", usPosting = true, allowPrivacyAck = false, budgetMs } = {}) =>
   p.evaluate(
-    async ([ats, profile, resume, coverLetter, company, usPosting, allowPrivacyAck]) => {
+    async ([ats, profile, resume, coverLetter, company, usPosting, allowPrivacyAck, budgetMs]) => {
       const ap = globalThis.__applypilot;
       const form = await ap.findForm({ ats, timeoutMs: 5000 });
-      const filled = await ap.fill({ profile, resume, coverLetter, ats, company, usPosting, allowPrivacyAck });
-      return { form, filled };
+      const t0 = Date.now();
+      const filled = await ap.fill({ profile, resume, coverLetter, ats, company, usPosting, allowPrivacyAck, ...(budgetMs ? { budgetMs } : {}) });
+      return { form, filled, fillMs: Date.now() - t0 };
     },
-    [ats, profile, resume, coverLetter, company, usPosting, allowPrivacyAck],
+    [ats, profile, resume, coverLetter, company, usPosting, allowPrivacyAck, budgetMs ?? 0],
   );
 const auditPage = (p, j, settings = {}) => p.evaluate(([j, settings]) => globalThis.__applypilot.audit({ job: j, settings }), [j, settings]);
 
 async function prepare(ats, slots = {}, { settings = {}, jobExtra = {}, pages = {}, html, profile = PROFILE, fill = {} } = {}) {
   const p = await open(URLS[ats], { [URLS[ats]]: html ?? (await page(ats, slots)), ...pages });
   try {
-    const { form, filled } = await findAndFill(p, ats, { profile, ...fill });
+    const { form, filled, fillMs } = await findAndFill(p, ats, { profile, ...fill });
     const audit = await auditPage(p, job(ats, { profile, ...jobExtra }), settings);
-    return { page: p, form, filled, audit };
+    return { page: p, form, filled, audit, fillMs };
   } catch (e) {
     await p.close();
     throw e;
@@ -685,6 +688,9 @@ const EDU_PROFILE = {
 };
 const remix = (profile = EDU_PROFILE, opts = {}) => fixture("greenhouse-remix.html").then((html) => prepare("greenhouse", {}, { html, profile, ...opts }));
 const PRIVACY_BOX = "question_9601409101[]_71316806101";
+// Whether a line names this field last, with or without the fill's note on why it gave up ("Needs your answer:
+// Degree (options seen 0)").
+const names = (t, label) => [t, t.replace(/ \([^()]*\)$/, "")].some((x) => x.endsWith(`: ${label}`));
 const singles = (p) =>
   p.evaluate(() => Object.fromEntries([...document.querySelectorAll("input.select__input")].map((i) => [i.id, i.closest(".select-shell").querySelector(".select__single-value")?.textContent || ""])));
 
@@ -709,8 +715,8 @@ test("Greenhouse's newer form: what can't be answered is named by its own label,
   using(remix({ ...PROFILE, city: "Nowhere", education: [{ school: "Unknown School", degree: "Certificate in Welding", field: "", startYear: "", endYear: "" }] }), async ({ page: p, audit }) => {
     const texts = audit.blockers.map((b) => b.text);
     for (const t of texts) assert.doesNotMatch(t, /results found|: text$/i);
-    for (const label of ["Location (City)", "Degree", "Discipline", "Start date year"]) assert.ok(texts.some((t) => t.endsWith(`: ${label}`)), `${label} in ${texts}`);
-    assert.ok(!texts.some((t) => /School$/.test(t)));
+    for (const label of ["Location (City)", "Degree", "Discipline", "Start date year"]) assert.ok(texts.some((t) => names(t, label)), `${label} in ${texts}`);
+    assert.ok(!texts.some((t) => names(t, "School")));
     assert.equal((await singles(p))["degree--0"], "");
   }));
 
@@ -798,6 +804,454 @@ test("Greenhouse's newer form: when the hidden input ignores the file, dropping 
     assert.equal(await p.evaluate(() => window.__resumeTaken || 0), 1);
     assert.deepEqual(codes(audit), [], JSON.stringify(audit.blockers));
   }));
+
+// The same form built from the libraries Greenhouse ships (react-select 5.10.1 and react-select-async-paginate) and
+// React (greenhouse-real.jsx), for what the imitation above can't show: Greenhouse's own menu state (typing alone
+// opens no list), lists loaded from the board only while open, a phone picker that shows a flag box and "+1", a place
+// the geocoder confirms after the click, and an upload widget that takes its input away and shows the file's name only
+// once its upload answers.
+const real = (cfg = {}, { profile = EDU_PROFILE, ...opts } = {}) =>
+  fixture("greenhouse-real.html").then((html) =>
+    prepare("greenhouse", {}, {
+      profile,
+      settings: { allowPrivacyAck: true },
+      fill: { allowPrivacyAck: true },
+      ...opts,
+      html: html.replace("<!--slot:config-->", () => `<script>window.__gh = ${JSON.stringify(cfg)};</script>`),
+    }),
+  );
+// What each dropdown shows: the phone picker a flag box (no text) and "+1", the place as the geocoder names it, the
+// degree and the state as the board's own lists name them.
+const REAL_FILLED = {
+  country: "+1",
+  "candidate-location": "Grayson, GA, USA",
+  "school--0": "Georgia Piedmont Technical College",
+  "degree--0": "Associates Degree",
+  "discipline--0": "Information Technology",
+  question_9601406101: "United States",
+  question_9601407101: "GA",
+};
+const ghState = (p) =>
+  p.evaluate(() => ({ ...globalThis.__ghState, taken: globalThis.__resumeTaken || 0, submits: window.__submits }));
+const REAL_STATE = {
+  country: "United States +1",
+  "candidate-location": "Grayson, GA, USA",
+  "school--0": "Georgia Piedmont Technical College",
+  "degree--0": "Associates Degree",
+  "discipline--0": "Information Technology",
+  question_9601406101: "United States",
+  question_9601407101: "GA",
+  first_name: "Test",
+  last_name: "Person",
+  email: "t@example.com",
+  phone: "555-010-0199",
+  "start-year--0": "2019",
+  "end-year--0": "2021",
+  question_9601408101: PROFILE.linkedIn,
+  resume: RESUME.name,
+  privacy: true,
+  taken: 1,
+  submits: 0,
+};
+// Buttons on the form ApplyPilot must never press, and the lists it must not leave open.
+const NEVER = ["Locate me", "Dropbox", "Google Drive", "Enter manually", "Attach", "×", "Submit application", "Add another"];
+const pressedNever = (p) => p.evaluate((never) => window.__clicks.filter((c) => never.includes(c)), NEVER);
+const openLists = (p) => p.evaluate(() => [...document.querySelectorAll("[role=listbox]")].filter((b) => b.getBoundingClientRect().height > 0).length);
+const pageCounts = (p) => p.evaluate(() => ({ taken: globalThis.__resumeTaken || 0, drops: globalThis.__drops || 0, picks: globalThis.__locationPicks || 0 }));
+
+test("real libraries: every answer reaches the page's own state and reads back; the resume is proven by its widget", () =>
+  using(real(), async ({ page: p, filled, audit }) => {
+    assert.deepEqual(await singles(p), REAL_FILLED);
+    assert.deepEqual(await ghState(p), REAL_STATE);
+    assert.deepEqual(filled.blockers, []);
+    assert.deepEqual(audit.blockers, []);
+    assert.equal(audit.resumeVerifiedBy, "chip");
+    const got = Object.fromEntries(filled.filled.map((x) => [x.label, `${x.value} [${x.source}]`]));
+    assert.equal(got["Resume/CV"], `${RESUME.name} [resume]`);
+    // What the page shows, and the option chosen beside it when the page shows it in a shorter form.
+    assert.equal(got.Country, "🇺🇸 +1 (chose United States +1) [profile]");
+    assert.equal(got["Location (City)"], "Grayson, GA, USA [profile]");
+    assert.deepEqual(await pressedNever(p), []);
+    assert.equal(await openLists(p), 0);
+    assert.deepEqual(await pageCounts(p), { taken: 1, drops: 0, picks: 1 });
+  }));
+
+test("real libraries: lists that open only on a key-up, a mouse-up or their toggle (none as you type) are opened and chosen", () =>
+  using(real({ menu: "greenhouse" }), async ({ page: p, filled, audit }) => {
+    assert.deepEqual(await singles(p), REAL_FILLED);
+    assert.deepEqual(filled.blockers, []);
+    assert.deepEqual(audit.blockers, []);
+    assert.deepEqual(await pressedNever(p), []);
+  }));
+
+test("real libraries: react-select's own menu (opened by typing) still works", () =>
+  using(real({ menu: "library" }), async ({ page: p, audit }) => {
+    assert.deepEqual(await singles(p), REAL_FILLED);
+    assert.deepEqual(audit.blockers, []);
+  }));
+
+test("real libraries: a list that stays open when its field loses focus is shut, and never read as the next dropdown's", () =>
+  using(
+    real({ menu: "greenhouse", menuStaysOpen: true }, { profile: { ...EDU_PROFILE, education: [{ ...EDU_PROFILE.education[0], school: "Unknown School" }] } }),
+    async ({ page: p, audit }) => {
+      const s = await singles(p);
+      assert.deepEqual([s["school--0"], s["degree--0"], s["discipline--0"]], ["", "Associates Degree", "Information Technology"]);
+      assert.deepEqual(audit.blockers, []);
+      assert.equal(await openLists(p), 0);
+    },
+  ));
+
+test("real libraries: a place the geocoder confirms seconds after the click is chosen once and read back", () =>
+  using(real({ locationConfirmMs: 4000 }), async ({ page: p, filled, audit }) => {
+    assert.equal((await singles(p))["candidate-location"], "Grayson, GA, USA");
+    assert.deepEqual(filled.blockers, []);
+    assert.deepEqual(audit.blockers, []);
+    assert.equal((await pageCounts(p)).picks, 1);
+    assert.deepEqual(await pressedNever(p), []);
+  }));
+
+test(`real libraries: a phone picker that shows only "🇺🇸 +1" for United States +1 passes`, () =>
+  using(real({ phoneDisplay: "flag" }), async ({ page: p, filled, audit }) => {
+    assert.equal((await singles(p)).country, "🇺🇸 +1");
+    assert.equal((await ghState(p)).country, "United States +1");
+    assert.deepEqual(filled.blockers, []);
+    assert.deepEqual(audit.blockers, []);
+    assert.ok(filled.filled.some((x) => x.label === "Country" && x.value === "🇺🇸 +1 (chose United States +1)"), JSON.stringify(filled.filled));
+  }));
+
+// "+1" alone is the U.S., Canada, Puerto Rico, Jamaica, the U.S. Minor Outlying Islands and more: a picker that shows
+// only a dialling code never proves the country, whichever one the page kept.
+for (const swap of ["", "CA", "UM"])
+  test(`real libraries: a phone picker that shows only "+1"${swap ? ` while the page keeps ${swap}` : ""} goes to you`, () =>
+    using(real({ phoneDisplay: "dial", ...(swap ? { phoneSwap: swap } : {}) }), async ({ page: p, filled, audit }) => {
+      assert.equal((await singles(p)).country, "+1");
+      const line = "Check the answer the site filled in: Country (chose 1 of 2 options, page shows only a dialling code)";
+      assert.deepEqual(filled.blockers.map((b) => b.text), [line]);
+      assert.deepEqual(audit.blockers.map((b) => b.text), [line]);
+      assert.ok(!filled.filled.some((x) => x.label === "Country"), JSON.stringify(filled.filled));
+    }));
+
+// The site keeps another country in the phone picker whatever is chosen: never passed as yours, in any form, even when
+// the only text it shows is the same "+1" (the flag box says Canada).
+for (const [display, swap, single, shown] of [
+  ["label", "CA", "Canada +1", "Canada +1"],
+  ["flag", "CA", "🇨🇦 +1", "🇨🇦 +1"],
+  ["iti", "CA", "+1", "🇨🇦 +1"],
+  ["dial", "GB", "+44", "only a dialling code"],
+])
+  test(`real libraries: a phone picker that shows "${single}"${single === shown ? "" : ` (${shown})`} after United States +1 was chosen goes to you`, () =>
+    using(real({ phoneDisplay: display, phoneSwap: swap }), async ({ page: p, filled, audit }) => {
+      assert.equal((await singles(p)).country, single);
+      // The note says what the page shows, never the option chosen for you (2 options read "United States").
+      const line = `Check the answer the site filled in: Country (chose 1 of 2 options, page shows ${/^only/.test(shown) ? shown : `'${shown}'`})`;
+      assert.deepEqual(filled.blockers.map((b) => b.text), [line]);
+      assert.deepEqual(audit.blockers.map((b) => b.text), [line]);
+      assert.ok(!filled.filled.some((x) => x.label === "Country"), JSON.stringify(filled.filled));
+    }));
+
+// A phone country the site chose itself passes when its flag or its name is your country; "+1" could be Canada's, and
+// Canada is not yours.
+for (const [cfg, country, lines] of [
+  [{ phoneDefault: "US" }, "United States +1", []],
+  [{ phoneDefault: "US", phoneDisplay: "label" }, "United States +1", []],
+  [{ phoneDefault: "US", phoneDisplay: "dial" }, "United States +1", ["Check the answer the site filled in: Country"]],
+  [{ phoneDefault: "CA" }, "Canada +1", ["Check the answer the site filled in: Country"]],
+])
+  test(`real libraries: a phone country the site chose itself (${JSON.stringify(cfg)}) ${lines.length ? "goes to you" : "passes"}`, () =>
+    using(real(cfg), async ({ page: p, audit }) => {
+      assert.equal((await ghState(p)).country, country);
+      assert.deepEqual(audit.blockers.map((b) => b.text), lines);
+    }));
+
+test("real libraries: an upload widget that keeps its input is proven by the input's file", () =>
+  using(real({ keepFileInput: true }), async ({ page: p, filled, audit }) => {
+    assert.equal((await values(p)).resume, 1);
+    assert.deepEqual(audit.blockers, []);
+    assert.equal(audit.resumeVerifiedBy, "file");
+    assert.ok(filled.filled.some((x) => x.label === "Resume/CV" && x.source === "resume"), JSON.stringify(filled.filled));
+  }));
+
+// The widget takes its input and buttons away at once and shows the file's name only when its upload answers: the file
+// is given once, never dropped on the box as well, and the name is waited for.
+for (const [name, cfg] of [
+  ["shows the name 1.8 s later", { acceptDrop: true }],
+  ["uploads to S3 with a progress bar first", { acceptDrop: true, s3: true, uploadMs: 4000 }],
+])
+  test(`real libraries: an upload box that ${name} gets the file once and proves it`, () =>
+    using(real(cfg), async ({ page: p, audit }) => {
+      assert.deepEqual(audit.blockers, []);
+      assert.equal(audit.resumeVerifiedBy, "chip");
+      assert.deepEqual(await pageCounts(p), { taken: 1, drops: 0, picks: 1 });
+    }));
+
+test("real libraries: an upload that doesn't take PDFs is never given the resume, and says which types it takes", () =>
+  using(real({ allowedTypes: ["doc", "docx"] }), async ({ page: p, filled, audit }) => {
+    const line = "Your resume didn't attach (the upload takes only .doc, .docx).";
+    assert.deepEqual(filled.blockers.map((b) => b.text), [line]);
+    assert.deepEqual(audit.blockers.map((b) => b.text), [line]);
+    assert.equal((await values(p)).resume, 0);
+    assert.equal((await pageCounts(p)).taken, 0);
+  }));
+
+test("real libraries: a server-rendered form that hydrates late still gets the resume and every answer", () =>
+  using(real({ hydrateAfterMs: 3000 }), async ({ page: p, audit }) => {
+    assert.deepEqual(await singles(p), REAL_FILLED);
+    assert.deepEqual(await ghState(p), REAL_STATE);
+    assert.deepEqual(audit.blockers, []);
+    assert.equal(audit.resumeVerifiedBy, "chip");
+  }));
+
+test("real libraries: a fresh form the page puts in place while the dropdowns are being chosen gets every answer again", () =>
+  using(real({ parseAfterMs: 6000 }), async ({ page: p, audit }) => {
+    assert.equal(await p.evaluate(() => globalThis.__parsed), 1);
+    assert.deepEqual(await singles(p), REAL_FILLED);
+    assert.deepEqual(await ghState(p), REAL_STATE);
+    assert.deepEqual(audit.blockers, []);
+    assert.equal(audit.resumeVerifiedBy, "chip");
+  }));
+
+test("real libraries: outside the U.S. the state question gets the saved form's own not-in-the-U.S. answer", () =>
+  using(real({}, { profile: { ...EDU_PROFILE, country: "Canada", state: "", city: "" } }), async ({ page: p, audit }) => {
+    const s = await singles(p);
+    assert.deepEqual([s.country, s.question_9601406101, s.question_9601407101], ["+1", "Canada", "I am not located in the United States of America currently"]);
+    assert.equal((await ghState(p)).country, "Canada +1");
+    assert.deepEqual(audit.blockers.map((b) => b.text), ["Needs your answer: Location (City) (no city in your profile)"]);
+  }));
+
+test("real libraries: a resume the widget never shows is one line that says why, and the box is not a second question", () =>
+  using(real({ rejectFiles: true }), async ({ filled, audit }) => {
+    const line = "Your resume didn't attach (the page never reacted to the file).";
+    assert.deepEqual(filled.blockers.map((b) => b.text), [line]);
+    assert.deepEqual(audit.blockers.map((b) => b.text), [line]);
+  }));
+
+test("real libraries: what can't be chosen says what the dropdown offered, never your answer", () =>
+  using(
+    real({}, { profile: { ...EDU_PROFILE, city: "Springfield", education: [{ ...EDU_PROFILE.education[0], degree: "Certificate in Welding", field: "Alchemy" }] } }),
+    async ({ page: p, audit }) => {
+      const texts = audit.blockers.map((b) => b.text).sort();
+      assert.deepEqual(texts, [
+        "Needs your answer: Degree (no degree ApplyPilot can name in your record)",
+        "Needs your answer: Discipline (options seen 0)",
+        "Needs your answer: Location (City) (options seen 2, 0 matches)",
+      ]);
+      const s = await singles(p);
+      assert.deepEqual([s["candidate-location"], s["degree--0"], s["discipline--0"]], ["", "", ""]);
+      assert.equal(await openLists(p), 0);
+    },
+  ));
+
+test("real libraries: every field left to you for want of a saved answer says so", () =>
+  using(real({}, { profile: { ...PROFILE, linkedIn: "", education: [] } }), async ({ audit }) => {
+    assert.deepEqual(audit.blockers.map((b) => b.text).sort(), [
+      "Needs your answer: Degree (no education in your profile)",
+      "Needs your answer: Discipline (no education in your profile)",
+      "Needs your answer: End date year (no education in your profile)",
+      "Needs your answer: LinkedIn Profile (no LinkedIn URL in your profile)",
+      "Needs your answer: Start date year (no education in your profile)",
+    ]);
+  }));
+
+// react-select's screen-reader log names an option by its label, which may be shorter than what the list draws
+// (formatOptionLabel adds " +1" to "United States"): that is the option clicked, not another one.
+for (const [display, shown, value] of [
+  ["iti", "+1", "🇺🇸 +1 (chose United States +1)"],
+  ["label", "United States", "United States (chose United States +1)"],
+])
+  test(`real libraries: a phone option labelled "United States" and drawn "United States +1" is chosen (field shows "${shown}")`, () =>
+    using(real({ phoneLabelName: true, phoneDisplay: display }), async ({ page: p, filled, audit }) => {
+      assert.equal((await singles(p)).country, shown);
+      assert.equal((await ghState(p)).country, "United States");
+      assert.deepEqual(filled.blockers, []);
+      assert.deepEqual(audit.blockers, []);
+      assert.ok(filled.filled.some((x) => x.label === "Country" && x.value === value), JSON.stringify(filled.filled));
+    }));
+
+test("real libraries: phone options drawn as text with their flag first are chosen", () =>
+  using(real({ phoneOptionText: "emoji" }), async ({ page: p, filled, audit }) => {
+    assert.equal((await ghState(p)).country, "United States +1");
+    assert.deepEqual(filled.blockers, []);
+    assert.deepEqual(audit.blockers, []);
+  }));
+
+test("real libraries: lists whose toggle opens them on a mouse press (as react-select's own does) are opened and chosen", () =>
+  using(real({ toggleOn: "mousedown" }), async ({ page: p, filled, audit }) => {
+    assert.deepEqual(await singles(p), REAL_FILLED);
+    assert.deepEqual(filled.blockers, []);
+    assert.deepEqual(audit.blockers, []);
+    assert.deepEqual(await pressedNever(p), []);
+    assert.equal(await openLists(p), 0);
+  }));
+
+// A country that only contains "United States" in its name is not the United States, in either direction.
+test("real libraries: the U.S. Minor Outlying Islands, chosen, never passes when the page shows the U.S. flag", () =>
+  using(real({ phoneSwap: "US" }, { profile: { ...EDU_PROFILE, country: "United States Minor Outlying Islands" } }), async ({ page: p, filled }) => {
+    assert.equal((await ghState(p)).country, "United States +1");
+    assert.ok(filled.blockers.some((b) => b.text === "Check the answer the site filled in: Country (chose 1 of 1 option, page shows '🇺🇸 +1')"), JSON.stringify(filled.blockers));
+    assert.ok(!filled.filled.some((x) => x.label === "Country"), JSON.stringify(filled.filled));
+  }));
+
+test("real libraries: a place the geocoder confirms after the wait for it is still read back and recorded, never chosen twice", () =>
+  using(real({ locationConfirmMs: 9000 }), async ({ page: p, filled, audit }) => {
+    assert.equal((await singles(p))["candidate-location"], "Grayson, GA, USA");
+    assert.deepEqual(filled.blockers, []);
+    assert.deepEqual(audit.blockers, []);
+    assert.ok(filled.filled.some((x) => x.label === "Location (City)" && x.value === "Grayson, GA, USA"), JSON.stringify(filled.filled));
+    assert.equal((await pageCounts(p)).picks, 1);
+  }));
+
+// An upload that shows nothing for a while, or only marks its box busy, is uploading: the file is never given again.
+for (const [name, cfg] of [
+  ["shows nothing for 9 s", { uploadQuiet: true, chipAfterMs: 9000 }],
+  ["only marks its box busy for 6 s", { uploadQuiet: true, busyAttr: true, chipAfterMs: 6000 }],
+])
+  test(`real libraries: an upload box that ${name} gets the file once`, () =>
+    using(real(cfg), async ({ page: p, audit }) => {
+      assert.deepEqual(audit.blockers, []);
+      assert.equal(audit.resumeVerifiedBy, "chip");
+      assert.equal((await pageCounts(p)).taken, 1);
+    }));
+
+// Dropdowns that lie about what they kept, or that differ from react-select (odd-combobox.js).
+const ODD_SCRIPT = `<script src="/assets/odd-combobox.js"></script>`;
+const odd = (id, label, opts, attrs = {}) =>
+  `<div class="field" data-odd='${JSON.stringify(opts).replace(/'/g, "&#39;")}' ${Object.entries(attrs)
+    .map(([k, v]) => `data-${k}='${(typeof v === "string" ? v : JSON.stringify(v)).replace(/'/g, "&#39;")}'`)
+    .join(" ")}><label for="${id}">${label}<span class="asterisk">*</span></label><span role="log" aria-live="polite" class="visually-hidden"></span><div class="select__control"><div class="select__value-container"><div class="select__placeholder">Select...</div><div class="select__input-container"><input id="${id}" role="combobox" aria-haspopup="true" aria-expanded="false" aria-required="true" autocomplete="off"></div></div></div><input type="hidden" name="${id}" value=""></div>`;
+const oddState = (p) => p.evaluate(() => window.__odd);
+const STATE_SHOWS = { Virginia: "VA", "West Virginia": "WV", Georgia: "GA" };
+
+test("a state list that shows the postal code passes for your state, and 'VA' is never West Virginia", async () => {
+  await using(
+    prepare("greenhouse", { fields: odd("state", "State", ["Virginia", "West Virginia", "Georgia"], { show: STATE_SHOWS }), script: ODD_SCRIPT }, { profile: { ...PROFILE, state: "WV" } }),
+    async ({ page: p, filled, audit }) => {
+      assert.deepEqual(await oddState(p), { state: "West Virginia" });
+      assert.deepEqual(filled.blockers, []);
+      assert.deepEqual(audit.blockers, []);
+      assert.ok(filled.filled.some((x) => x.label === "State" && x.value === "WV (chose West Virginia)"), JSON.stringify(filled.filled));
+    },
+  );
+  await using(
+    prepare(
+      "greenhouse",
+      { fields: odd("state", "State", ["Virginia", "West Virginia", "Georgia"], { show: STATE_SHOWS, swap: { "West Virginia": "Virginia" } }), script: ODD_SCRIPT },
+      { profile: { ...PROFILE, state: "WV" } },
+    ),
+    async ({ page: p, filled, audit }) => {
+      assert.deepEqual(await oddState(p), { state: "Virginia" });
+      const line = "Check the answer the site filled in: State (chose 1 of 1 option, page shows 'VA')";
+      assert.deepEqual(filled.blockers.map((b) => b.text), [line]);
+      assert.deepEqual(audit.blockers.map((b) => b.text), [line]);
+      assert.ok(!filled.filled.some((x) => x.label === "State"), JSON.stringify(filled.filled));
+    },
+  );
+});
+
+test("a place chosen in your state that the page keeps in another state goes to you", () =>
+  using(
+    prepare("greenhouse", {
+      fields: odd("candidate-location", "Location (City)", ["Grayson, GA, USA", "Grayson, KY, USA"], { swap: { "Grayson, GA, USA": "Grayson, KY, USA" } }),
+      script: ODD_SCRIPT,
+    }),
+    async ({ page: p, filled, audit }) => {
+      assert.deepEqual(await oddState(p), { "candidate-location": "Grayson, KY, USA" });
+      const line = "Check the answer the site filled in: Location (City) (chose 1 of 2 options, page shows something else)";
+      assert.deepEqual(filled.blockers.map((b) => b.text), [line]);
+      assert.deepEqual(audit.blockers.map((b) => b.text), [line]);
+      assert.ok(!filled.filled.some((x) => x.label === "Location (City)"), JSON.stringify(filled.filled));
+    },
+  ));
+
+test("a note never quotes a page value that repeats the option chosen for you", () =>
+  using(
+    prepare(
+      "greenhouse",
+      {
+        fields: `<section><h2>Education</h2>${odd("school--0", "School", ["Georgia Piedmont Technical College"])}${odd("degree--0", "Degree", ["Associates Degree", "Bachelors Degree"])}${odd("discipline--0", "Discipline", ["Information Technology", "Computer Science"], { show: { "Information Technology": "Information Technology (IT)" } })}</section>`,
+        script: ODD_SCRIPT,
+      },
+      { profile: EDU_PROFILE },
+    ),
+    async ({ filled, audit }) => {
+      const line = "Check the answer the site filled in: Discipline (chose 1 of 1 option, page shows something else)";
+      assert.deepEqual(filled.blockers.map((b) => b.text), [line]);
+      assert.deepEqual(audit.blockers.map((b) => b.text), [line]);
+    },
+  ));
+
+test("react-select before 5.8 (a menu and options with ids but no roles) is read and chosen", () =>
+  using(prepare("greenhouse", { fields: odd("country", "Country", ["United States", "Canada"], { markup: "rs57" }), script: ODD_SCRIPT }), async ({ page: p, filled, audit }) => {
+    assert.deepEqual(await oddState(p), { country: "United States" });
+    assert.deepEqual(filled.blockers, []);
+    assert.deepEqual(audit.blockers, []);
+  }));
+
+// The toggle ApplyPilot may press to open a list is the list's own: never a switch, a pressed toggle or a button
+// elsewhere on the form that happens to say "Open" or "Show".
+for (const [name, btn] of [
+  ["a 'Show my profile' toggle", `<button type="button" id="share" aria-pressed="false" onclick="this.setAttribute('aria-pressed', this.getAttribute('aria-pressed') === 'true' ? 'false' : 'true')">Show my profile to other Acme teams</button>`],
+  ["an 'Open to relocation' switch", `<button type="button" id="relo" role="switch" aria-checked="false" onclick="this.setAttribute('aria-checked', 'true')">Open to relocation</button>`],
+  ["an 'Open job description' link-button", `<div role="button" id="jd" tabindex="0" onclick="window.__jd = 1">Open job description</div>`],
+  ["a 'Show options' menu button for another question", `<button type="button" id="more" aria-haspopup="true" aria-expanded="false">Show options</button>`],
+])
+  test(`a list that never opens is never opened with ${name} beside it`, () =>
+    using(
+      prepare("greenhouse", { fields: odd("country", "Country", ["United States", "Canada"], { open: "never" }) + `<div class="field"><p>Preferences</p>${btn}</div>`, script: ODD_SCRIPT }),
+      async ({ page: p, filled }) => {
+        assert.deepEqual(await p.evaluate(() => window.__clicks.filter((c) => ["share", "relo", "jd", "more"].includes(c))), []);
+        assert.deepEqual(filled.blockers.map((b) => b.text), ["Needs your answer: Country (no list opened)"]);
+      },
+    ));
+
+// Ten dropdowns whose script never runs: the fill keeps to its budget, and every one still has its line.
+const DEAD_COMBOS = [
+  ["country", "Country", ["United States", "Canada"]],
+  ["state", "State", ["Georgia", "Alabama"]],
+  ["question_5001", "Are you legally authorized to work in the United States?", ["Yes", "No"]],
+  ["question_5002", "Will you now or in the future require visa sponsorship?", ["Yes", "No"]],
+  ["question_5003", "Are you authorized to work in the U.S.?", ["Yes", "No"]],
+  ["question_5004", "Do you require sponsorship to work in the United States?", ["Yes", "No"]],
+  ["question_5005", "Are you legally eligible to work in the United States?", ["Yes", "No"]],
+  ["question_5006", "What country are you currently a resident of?", ["United States", "Canada"]],
+  ["question_5007", "What state do you currently reside in?", ["Georgia", "Alabama"]],
+  ["question_5008", "Will you require sponsorship for employment visa status now or in the future?", ["Yes", "No"]],
+];
+test("dropdowns that never open don't run the fill past its budget, and each one says why it is left to you", () =>
+  using(prepare("greenhouse", { fields: DEAD_COMBOS.map(combo).join("") }, { fill: { budgetMs: 60000 } }), async ({ filled, fillMs }) => {
+    assert.ok(fillMs < 60000, `fill took ${fillMs} ms`);
+    const texts = filled.blockers.map((b) => b.text);
+    for (const [, label] of DEAD_COMBOS)
+      assert.ok(
+        texts.some((t) => t === `Needs your answer: ${label} (no list opened)` || t === `Needs your answer: ${label} (ApplyPilot ran out of time)`),
+        `${label} in ${JSON.stringify(texts)}`,
+      );
+  }));
+
+// An upload that takes the file but shows nothing for seconds is never given it a second time.
+test("an upload that shows the file's name only 3.5 s after taking it gets the file once", () =>
+  using(
+    prepare("greenhouse", {
+      resume: `<div class="field" id="resume_fieldset"><label id="upload-label-resume" for="resume">Resume/CV<span class="asterisk">*</span></label><input id="resume" name="resume" type="file" class="visually-hidden" aria-required="true" data-upload="drop"><div class="file-status" id="resume-status"></div></div>`,
+      script: `<script>
+        window.__uploads = 0;
+        const r = document.getElementById("resume");
+        r.addEventListener("change", () => {
+          window.__uploads++;
+          const name = r.files[0] && r.files[0].name;
+          setTimeout(() => {
+            const chip = document.createElement("span");
+            chip.className = "chip";
+            chip.textContent = name;
+            document.getElementById("resume-status").replaceChildren(chip);
+          }, 3500);
+        });
+      </script>`,
+    }),
+    async ({ page: p, audit }) => {
+      assert.equal(await p.evaluate(() => window.__uploads), 1);
+      assert.deepEqual(audit.blockers, []);
+    },
+  ));
 
 test("privacy-policy box: ticked under the setting and listed with the submission", () =>
   using(remix(EDU_PROFILE, { settings: { allowPrivacyAck: true }, fill: { allowPrivacyAck: true } }), async ({ page: p, filled, audit }) => {
@@ -931,8 +1385,8 @@ for (const [credential, field, degree, discipline] of [
       const s = await singles(p);
       assert.deepEqual([s["degree--0"], s["discipline--0"]], [degree, discipline]);
       const texts = audit.blockers.map((b) => b.text);
-      if (!degree) assert.ok(texts.some((t) => t.endsWith(": Degree")), JSON.stringify(texts));
-      if (!discipline) assert.ok(texts.some((t) => t.endsWith(": Discipline")), JSON.stringify(texts));
+      if (!degree) assert.ok(texts.some((t) => names(t, "Degree")), JSON.stringify(texts));
+      if (!discipline) assert.ok(texts.some((t) => names(t, "Discipline")), JSON.stringify(texts));
     }));
 
 // Your country as you typed it: "U.S", "America" and "USA" all live in the U.S., so the state question gets your state
@@ -949,6 +1403,13 @@ test("Greenhouse's newer form: a U.S. state with a country ApplyPilot can't read
   using(remix({ ...EDU_PROFILE, country: "Untied Staets" }), async ({ page: p, audit }) => {
     assert.equal((await singles(p)).question_9601407101, "");
     assert.ok(audit.blockers.some((b) => b.code === "unanswered_required" && /state of residence/.test(b.text)), JSON.stringify(audit.blockers));
+  }));
+
+test("a dropdown whose script never runs is tried again, then left to you with 'no list opened'", () =>
+  using(prepare("greenhouse", { fields: combo(["question_4001", "Are you legally authorized to work in the United States?", ["Yes", "No"]]) }), async ({ filled, audit }) => {
+    const line = "Needs your answer: Are you legally authorized to work in the United States? (no list opened)";
+    assert.deepEqual(filled.blockers.map((b) => b.text), [line]);
+    assert.deepEqual(audit.blockers.map((b) => b.text), [line]);
   }));
 
 test("a location autocomplete never takes a longer place name that starts with your city", () =>
@@ -1270,7 +1731,7 @@ test("snapshot keeps structure and leaves out every value", () =>
 test("installing twice keeps one library and its clicked flag", () =>
   using(prepare("greenhouse"), async ({ page: p, audit }) => {
     const first = await p.evaluate(() => (window.__first = globalThis.__applypilot, globalThis.__applypilot.version));
-    assert.equal(first, "3.1.1");
+    assert.equal(first, "3.2.0");
     assert.deepEqual((await press(p, audit.fingerprint)).r, { clicked: true });
     await p.addScriptTag({ path: LIB });
     const s = await p.evaluate((fp) => ({ same: window.__first === globalThis.__applypilot, again: globalThis.__applypilot.pressSubmit(fp), submits: window.__submits }), audit.fingerprint);
@@ -1742,7 +2203,7 @@ test("dashboard hook: a hello sent before the bridge loaded doesn't turn a conne
       window.__hellos = 0;
       let loaded = false, loading = false;
       const reply = (type, payload, replyTo) => window.postMessage({ channel: "applypilot", v: 1, from: "extension", type, id: crypto.randomUUID(), replyTo, payload }, location.origin);
-      const READY = { version: "3.1.1", held: [], running: false, resultsWaiting: 0 };
+      const READY = { version: "3.2.0", held: [], running: false, resultsWaiting: 0 };
       window.addEventListener("message", (e) => {
         const d = e.data;
         if (!d || d.channel !== "applypilot" || d.from !== "dashboard") return;

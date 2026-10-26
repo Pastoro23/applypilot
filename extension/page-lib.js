@@ -3,7 +3,7 @@
 // assistant() is the popup's manual mode and never presses Submit. The batch runner uses the rest; only
 // pressSubmit() ever clicks a Submit button, once, after the rules that can be checked in the page hold again.
 (() => {
-  const VERSION = "3.1.1";
+  const VERSION = "3.2.0";
   const previous = globalThis.__applypilot;
   if (previous && previous.version === VERSION) return;
 
@@ -312,7 +312,7 @@
     (f.type || "").toLowerCase() === "checkbox" && own(f).some((x) => /current|present|still work/i.test(x));
   // Fields are walked in page order. When a field type repeats (a second "Company"), the next record starts,
   // so several entries inside one section each get their own record. Batch mode passes stricter matchers.
-  const fillRecords = (root, records, start, onSet, skip, { isCurrent = isCurrentBox, put = (f, key, v) => set(f, v) } = {}) => {
+  const fillRecords = (root, records, start, onSet, skip, { isCurrent = isCurrentBox, put = (f, key, v) => set(f, v), miss = null } = {}) => {
     let i = start,
       seen = new Set(),
       n = 0;
@@ -327,7 +327,12 @@
       }
       seen.add(key);
       const r = records[i];
-      if (!r) break;
+      // Batch mode says why a record field stays empty (miss); the popup just stops.
+      if (!r) {
+        if (!miss) break;
+        if (empty(f)) miss(f, key, null, null);
+        continue;
+      }
       if (!empty(f)) continue;
       if (key === "current") {
         if (r.current && !f.checked) {
@@ -342,7 +347,7 @@
       if (v && put(f, key, v)) {
         n++;
         onSet?.(f, f.tagName === "SELECT" ? undefined : v);
-      }
+      } else miss?.(f, key, v, r);
     }
     return { n, next: seen.size ? i + 1 : i };
   };
@@ -350,7 +355,8 @@
     let n = 0,
       at = 0;
     for (const root of roots) {
-      if (at >= records.length) break;
+      // Batch mode still walks a section with no record left, to say why each of its fields stays empty.
+      if (at >= records.length && !opts?.miss) break;
       const r = fillRecords(root, records, at, onSet, skip, opts);
       n += r.n;
       at = r.next;
@@ -631,6 +637,8 @@
     ["country", /^country( of residence)?$|^country name$/],
     ["linkedIn", /^linked ?in( profile)?( url| link)?$/],
   ];
+  // A profile field's name in a note ("no postal code in your profile").
+  const KEY_WORDS = { firstName: "first name", lastName: "last name", fullName: "full name", postalCode: "postal code", linkedIn: "LinkedIn URL" };
   const IDENTITY = PROFILE_FIELDS.filter(([k]) => ["firstName", "lastName", "fullName", "email", "phone"].includes(k));
   const SKILLS = [["skills", /^(key |technical |relevant |core |your )?skills( (and|&) (technologies|expertise|tools))?$|^technologies$|^(areas of )?expertise$/]];
   // Each country's own name first: that is what a country list is searched by.
@@ -638,6 +646,41 @@
     ["united states", "united states of america", "usa", "us", "u.s.", "u.s.a.", "u.s", "u.s.a", "america"],
     ["united kingdom", "uk", "u.k.", "u.k", "great britain", "united kingdom of great britain and northern ireland"],
   ];
+  // Every country's two-letter code and English name as intl-tel-input lists them, for the flag a phone country picker
+  // shows (Greenhouse's newer form shows the chosen country as an "iti__flag iti__us" box and "+1").
+  const ISO_COUNTRIES =
+    "ad:Andorra|ae:United Arab Emirates|af:Afghanistan|ag:Antigua & Barbuda|ai:Anguilla|al:Albania|am:Armenia|" +
+    "ao:Angola|ar:Argentina|as:American Samoa|at:Austria|au:Australia|aw:Aruba|ax:Åland Islands|az:Azerbaijan|" +
+    "ba:Bosnia & Herzegovina|bb:Barbados|bd:Bangladesh|be:Belgium|bf:Burkina Faso|bg:Bulgaria|bh:Bahrain|" +
+    "bi:Burundi|bj:Benin|bl:St. Barthélemy|bm:Bermuda|bn:Brunei|bo:Bolivia|bq:Caribbean Netherlands|br:Brazil|" +
+    "bs:Bahamas|bt:Bhutan|bw:Botswana|by:Belarus|bz:Belize|ca:Canada|cc:Cocos (Keeling) Islands|" +
+    "cd:Congo - Kinshasa|cf:Central African Republic|cg:Congo - Brazzaville|ch:Switzerland|ci:Côte d’Ivoire|" +
+    "ck:Cook Islands|cl:Chile|cm:Cameroon|cn:China|co:Colombia|cr:Costa Rica|cu:Cuba|cv:Cape Verde|cw:Curaçao|" +
+    "cx:Christmas Island|cy:Cyprus|cz:Czechia|de:Germany|dj:Djibouti|dk:Denmark|dm:Dominica|do:Dominican Republic|" +
+    "dz:Algeria|ec:Ecuador|ee:Estonia|eg:Egypt|eh:Western Sahara|er:Eritrea|es:Spain|et:Ethiopia|fi:Finland|" +
+    "fj:Fiji|fk:Falkland Islands|fm:Micronesia|fo:Faroe Islands|fr:France|ga:Gabon|gb:United Kingdom|gd:Grenada|" +
+    "ge:Georgia|gf:French Guiana|gg:Guernsey|gh:Ghana|gi:Gibraltar|gl:Greenland|gm:Gambia|gn:Guinea|gp:Guadeloupe|" +
+    "gq:Equatorial Guinea|gr:Greece|gt:Guatemala|gu:Guam|gw:Guinea-Bissau|gy:Guyana|hk:Hong Kong SAR China|" +
+    "hn:Honduras|hr:Croatia|ht:Haiti|hu:Hungary|id:Indonesia|ie:Ireland|il:Israel|im:Isle of Man|in:India|" +
+    "io:British Indian Ocean Territory|iq:Iraq|ir:Iran|is:Iceland|it:Italy|je:Jersey|jm:Jamaica|jo:Jordan|" +
+    "jp:Japan|ke:Kenya|kg:Kyrgyzstan|kh:Cambodia|ki:Kiribati|km:Comoros|kn:St. Kitts & Nevis|kp:North Korea|" +
+    "kr:South Korea|kw:Kuwait|ky:Cayman Islands|kz:Kazakhstan|la:Laos|lb:Lebanon|lc:St. Lucia|li:Liechtenstein|" +
+    "lk:Sri Lanka|lr:Liberia|ls:Lesotho|lt:Lithuania|lu:Luxembourg|lv:Latvia|ly:Libya|ma:Morocco|mc:Monaco|" +
+    "md:Moldova|me:Montenegro|mf:St. Martin|mg:Madagascar|mh:Marshall Islands|mk:North Macedonia|ml:Mali|" +
+    "mm:Myanmar (Burma)|mn:Mongolia|mo:Macao SAR China|mp:Northern Mariana Islands|mq:Martinique|mr:Mauritania|" +
+    "ms:Montserrat|mt:Malta|mu:Mauritius|mv:Maldives|mw:Malawi|mx:Mexico|my:Malaysia|mz:Mozambique|na:Namibia|" +
+    "nc:New Caledonia|ne:Niger|nf:Norfolk Island|ng:Nigeria|ni:Nicaragua|nl:Netherlands|no:Norway|np:Nepal|" +
+    "nr:Nauru|nu:Niue|nz:New Zealand|om:Oman|pa:Panama|pe:Peru|pf:French Polynesia|pg:Papua New Guinea|" +
+    "ph:Philippines|pk:Pakistan|pl:Poland|pm:St. Pierre & Miquelon|pr:Puerto Rico|ps:Palestinian Territories|" +
+    "pt:Portugal|pw:Palau|py:Paraguay|qa:Qatar|re:Réunion|ro:Romania|rs:Serbia|ru:Russia|rw:Rwanda|" +
+    "sa:Saudi Arabia|sb:Solomon Islands|sc:Seychelles|sd:Sudan|se:Sweden|sg:Singapore|sh:St. Helena|si:Slovenia|" +
+    "sj:Svalbard & Jan Mayen|sk:Slovakia|sl:Sierra Leone|sm:San Marino|sn:Senegal|so:Somalia|sr:Suriname|" +
+    "ss:South Sudan|st:São Tomé & Príncipe|sv:El Salvador|sx:Sint Maarten|sy:Syria|sz:Eswatini|" +
+    "tc:Turks & Caicos Islands|td:Chad|tg:Togo|th:Thailand|tj:Tajikistan|tk:Tokelau|tl:Timor-Leste|" +
+    "tm:Turkmenistan|tn:Tunisia|to:Tonga|tr:Turkey|tt:Trinidad & Tobago|tv:Tuvalu|tw:Taiwan|tz:Tanzania|" +
+    "ua:Ukraine|ug:Uganda|us:United States|uy:Uruguay|uz:Uzbekistan|va:Vatican City|vc:St. Vincent & Grenadines|" +
+    "ve:Venezuela|vg:British Virgin Islands|vi:U.S. Virgin Islands|vn:Vietnam|vu:Vanuatu|wf:Wallis & Futuna|" +
+    "ws:Samoa|ye:Yemen|yt:Mayotte|za:South Africa|zm:Zambia|zw:Zimbabwe";
   const APPROVED = ["profile", "record", "eligibility", "cover_letter", "resume"];
   const CHALLENGE_FRAMES = [
     (s) => /recaptcha\/(api2|enterprise)\/bframe/i.test(s),
@@ -703,7 +746,15 @@
     const t = norm(s);
     return t.length > n ? t.slice(0, n - 1) + "…" : t;
   };
-  const B = (code, label) => ({ code, text: label ? `${COPY[code].replace(/\.$/, "")}: ${clip(label, 120)}` : COPY[code] });
+  // A blocker's line: the rule's words, the field's label and, when the fill gave up on it, a few words on why
+  // ("options seen 0"), never what you'd have answered. The label gives up only what the note needs to keep the line
+  // within the runner's 200 characters.
+  const B = (code, label, note = "") => {
+    const why = note ? ` (${clip(note, 60)})` : "";
+    const lead = COPY[code].replace(/\.$/, "");
+    if (!label) return { code, text: why ? `${lead}${why}.` : COPY[code] };
+    return { code, text: `${lead}: ${clip(label, Math.min(120, 198 - lead.length - 2 - why.length))}${why}` };
+  };
 
   const state = {
     root: null,
@@ -711,6 +762,11 @@
     successBefore: null,
     href: "",
     filled: new Map(),
+    // Why the fill gave up on a field, the dropdowns it gave up on after their list opened, and the upload box
+    // ApplyPilot gave the resume to.
+    notes: new Map(),
+    tried: new Map(),
+    resume: null,
     audit: null,
     flagged: [],
     fillFlagged: [],
@@ -811,8 +867,9 @@
     for (let e = el.parentElement; e; e = e.parentElement) if (Number(getComputedStyle(e).opacity) === 0) return false;
     return true;
   }
-  // A dropdown's screen-reader log ("244 results found") is never part of a label or question. Alerts still count.
-  function textOf(el, skip = "select,option,textarea,script,style,[role=listbox],[role=option],[role=log]") {
+  // A dropdown's screen-reader log ("244 results found") is never part of a label or question, and neither is
+  // intl-tel-input's hidden country search and list on a phone field. Alerts still count.
+  function textOf(el, skip = "select,option,textarea,script,style,[role=listbox],[role=option],[role=log],.iti__dropdown-content") {
     if (!el) return "";
     let s = "";
     const w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
@@ -935,16 +992,33 @@
   const groupOf = (f) =>
     f.name ? Array.from(document.querySelectorAll(`input[type=radio][name="${CSS.escape(f.name)}"]`)) : [f];
   const pressedOf = (b) => b.getAttribute("aria-pressed") ?? b.getAttribute("aria-checked");
-  // The value a field shows, read the same way when it is filled and when it is checked again.
+  // The value a field shows, read the same way when it is filled and when it is checked again. A flag drawn as a
+  // picture (Greenhouse's phone country picker shows an "iti__flag iti__us" box and "+1") reads as the flag's own
+  // characters, "🇺🇸 +1", so the country it stands for is part of what is compared.
   function comboValue(f) {
     const labels = labelEls(f);
     let e = f.parentElement;
     for (let i = 0; e && i < 3; i++, e = e.parentElement) {
       if (labels.some((l) => e.contains(l)) || e.matches("form,fieldset")) break;
       const t = e.querySelector("[role=listbox]") ? textOf(e) : norm(e.innerText);
+      const flags = flagsIn(e);
+      if (flags) return norm(`${flags} ${t}`);
       if (t) return PLACEHOLDER.test(t) || t === norm(f.getAttribute("placeholder")) ? "" : t;
     }
     return norm(f.value);
+  }
+  // intl-tel-input's flag boxes in an element, as flag characters. Those in an open list belong to its options, not to
+  // what the field shows, unless the element is an option itself.
+  function flagsIn(e, option = false) {
+    const out = new Set();
+    for (const x of e.querySelectorAll("[class*='iti__']")) {
+      if (!option && x.closest("[role=listbox]")) continue;
+      for (const c of x.classList) {
+        const m = c.match(/^iti__([a-z]{2})$/);
+        if (m && ISO.has(m[1])) out.add(String.fromCodePoint(...Array.from(m[1], (ch) => ch.charCodeAt(0) - 97 + 0x1f1e6)));
+      }
+    }
+    return [...out].join(" ");
   }
   function ctlValue(f) {
     const t = typeOf(f);
@@ -1096,6 +1170,8 @@
   function locate(adapter) {
     const emails = emailInputs(document),
       resumes = resumeInputs(document);
+    // After ApplyPilot attached the resume, a widget may show the file in place of its input.
+    if (!resumes.length && resumeBoxNow(document)) resumes.push(resumeBoxNow(document));
     if (!emails.length || !resumes.length) return null;
     const holds = (r) => emails.some((e) => r.contains(e)) && resumes.some((x) => r.contains(x));
     for (const sel of adapter?.formRoot || []) {
@@ -1235,7 +1311,10 @@
     f.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
     return true;
   }
-  function record(el, source, intended) {
+  // chose: the option ApplyPilot clicked in a dropdown. The entry lists what the page shows, and the option beside it
+  // when the page shows it in another form ("🇺🇸 +1 (chose United States +1)"), never the option alone.
+  const shownWithChoice = (shown, chose) => (shown && chose && simple(shown) !== simple(chose) ? `${shown} (chose ${chose})` : shown);
+  function record(el, source, intended, chose = "") {
     const read = intended === undefined ? readFor(el) : intended;
     const t = typeOf(el);
     const native = ["INPUT", "SELECT", "TEXTAREA"].includes(el.tagName);
@@ -1245,7 +1324,7 @@
       label: clip(labelOf(el), 120),
       type: isCombo(el) ? "combobox" : native ? t : "choice",
       required: pair ? pair.required : el.tagName === "INPUT" && t === "radio" ? groupOf(el).some(isRequired) || groupRequired(el) : isRequired(el),
-      value: t === "file" ? shownValue(el) || clip(el.dataset.applypilotFile || "", 200) : shownValue(el) || clip(read, 200),
+      value: t === "file" ? shownValue(el) || clip(el.dataset.applypilotFile || "", 200) : clip(shownWithChoice(shownValue(el), chose) || read, 200),
       source,
       hash: fnv1a(read),
       phone: profileField(el, IDENTITY)?.[0] === "phone" ? digits(read) : "",
@@ -1306,7 +1385,8 @@
   const OUTSIDE_US = new RegExp(
     `^if you are (currently )?(based|located|living|residing) outside (of )?${US_WORD},? (please )?(select|choose|pick) "?i am not (currently )?(located|based|living|residing) in ${US_WORD}"?$`,
   );
-  const NOT_IN_US = new RegExp(`^i am not (currently )?(located|based|living|residing) in ${US_WORD}$`);
+  // The real option may end in a time word: "I am not located in the United States of America currently".
+  const NOT_IN_US = new RegExp(`^i am not (currently )?(located|based|living|residing) in ${US_WORD}( (currently|at (the moment|this time|present)))?$`);
   function residenceQuestion(f) {
     const text = norm([...new Set(labelEls(f))].map((l) => textOf(l)).join(" ") || f.getAttribute("aria-label"))
       .toLowerCase()
@@ -1386,6 +1466,84 @@
   // A phone country picker shows the dialling code after each name ("United States +1").
   const dialless = (t) => t.replace(/\s*\(?\+\d{1,4}\)?$/, "");
 
+  // The words an answer is made of, to compare what a dropdown shows with the option chosen in it: words and numbers,
+  // a dialling code as itself ("+1"), and a flag as its two letters ("flag:us").
+  const FLAGS = /(?:[\u{1F1E6}-\u{1F1FF}]{2})/gu;
+  function answerWords(text) {
+    const flags = [];
+    const t = norm(text).replace(FLAGS, (f) => {
+      flags.push(`flag:${Array.from(f, (c) => String.fromCharCode(c.codePointAt(0) - 0x1f1e6 + 97)).join("")}`);
+      return " ";
+    });
+    const words =
+      t
+        .toLowerCase()
+        .normalize("NFKD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/[\u2018\u2019]/g, "'")
+        .match(/\+?[\p{L}\p{N}]+(?:'[\p{L}]+)?/gu) || [];
+    return [...words, ...flags];
+  }
+  // Two-letter codes a page may show for a country ApplyPilot reads (a flag's letters).
+  const COUNTRY_CODES = new Map([
+    ["united states", ["us", "usa"]],
+    ["united kingdom", ["gb", "uk"]],
+  ]);
+  const ISO = new Map(ISO_COUNTRIES.split("|").map((x) => [x.slice(0, 2), x.slice(3)]));
+  // A country's name for comparing lists that spell it a little differently ("Bosnia & Herzegovina", "Bosnia and
+  // Herzegovina").
+  const countryKey = (s) =>
+    simple(String(s ?? "").replace(/&/g, " and "))
+      .replace(/\b(and|the|of)\b/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  const ISO_BY_NAME = new Map(Array.from(ISO, ([code, name]) => [countryKey(name), code]));
+  // The codes the whole option stands for: a U.S. state's postal code when the option is that state's name, and a
+  // country's codes and flag when it is that country's name (a phone picker's "Canada +1" is 🇨🇦). Never the codes of
+  // a name inside a longer one: "West Virginia" is not Virginia, and "United States Minor Outlying Islands" is not the
+  // United States.
+  function codesFor(chosen) {
+    const codes = new Set();
+    const whole = dialless(norm(String(chosen ?? "").replace(FLAGS, " ")));
+    const c = simple(whole);
+    for (const [code, name] of Object.entries(US_STATES)) if (c === simple(name)) codes.add(code.toLowerCase());
+    for (const names of COUNTRY_NAMES)
+      if (names.some((n) => c === simple(n))) for (const code of COUNTRY_CODES.get(names[0]) || []) codes.add(code).add(`flag:${code}`);
+    for (const v of [whole, ...variants("country", whole)]) {
+      const iso = ISO_BY_NAME.get(countryKey(v));
+      if (iso) codes.add(`flag:${iso}`);
+    }
+    return codes;
+  }
+  // A dialling code alone ("+1"), which many countries share, so it never stands for one of them.
+  const DIAL_ONLY = /^\(?\+\d{1,4}\)?$/;
+  // Whether a dropdown shows the option chosen in it in a shorter, coded form: a phone picker that shows "🇺🇸 +1" for
+  // "United States +1", a state list that shows "WV" for "West Virginia". Every word shown must come from the chosen
+  // option itself (a U.S. state's or a country's name also stands for its code and flag), so another country or place
+  // never passes, and at least one must be a code or flag that names the chosen option alone, so "Engineering" is
+  // never "Computer Engineering". A dialling code is never that code: "+1" is the U.S., Canada, Puerto Rico and more.
+  function shortFormOf(chosen, shown) {
+    const have = new Set(answerWords(chosen)),
+      codes = codesFor(chosen);
+    const words = answerWords(shown);
+    const coded = (w) => codes.has(w) || (have.has(w) && w.startsWith("flag:"));
+    return words.some(coded) && words.every((w) => have.has(w) || codes.has(w));
+  }
+  // Every flag a field shows must be the chosen option's own (drawn in it, or its country's), so "🇨🇦 +1" or even
+  // "🇨🇦 United States +1" is never United States +1.
+  const flagWords = (t) => answerWords(t).filter((w) => w.startsWith("flag:"));
+  function flagsAgree(chosen, shown) {
+    const ok = new Set([...flagWords(chosen), ...codesFor(chosen)]);
+    return flagWords(shown).every((w) => ok.has(w));
+  }
+  // The country a phone picker shows only as a flag and its dialling code ("🇺🇸 +1"), by name.
+  function flagCountry(v) {
+    const words = answerWords(v);
+    const flags = words.filter((w) => w.startsWith("flag:"));
+    if (flags.length !== 1 || !words.every((w) => w.startsWith("flag:") || /^\+\d+$/.test(w))) return "";
+    return ISO.get(flags[0].slice(5)) || "";
+  }
+
   // Education dropdowns name the degree from a fixed list. Your credential's own words pick exactly one kind, or none.
   // An abbreviation counts only on its own ("D.B.A." holds no "B.A."), and "Master" or "Associate" only as a degree
   // ("Master's", "Associate of Science"), never as a word in a certification's name.
@@ -1461,6 +1619,8 @@
     const byValue = options.filter((o) => o.value && wants.includes(clean(o.value)));
     return byValue.length === 1 ? byValue[0] : null;
   }
+  // The real options of a native select, without its "Select..." prompt.
+  const optionCount = (f) => Array.from(f.options || []).filter((o) => !o.disabled && norm(o.textContent) && !PLACEHOLDER.test(norm(o.textContent))).length;
   function setSelectStrict(f, wants, mode) {
     const o = selectOption(f, wants, mode);
     if (!o) return false;
@@ -1479,12 +1639,60 @@
   function safeToClick(el) {
     return !submitsForm(el) && !el.closest("a[href]") && !el.matches("input[type=submit],input[type=image],input[type=reset]");
   }
-  function listOptions(input) {
+  // The one list a combobox has open: the one it names (aria-controls or aria-owns), else the only list shown that no
+  // other combobox owns (one that names it, or holds it in its own box), so a list another dropdown left open is never
+  // read as this one's.
+  function listboxOf(input) {
     const ids = `${input.getAttribute("aria-controls") || ""} ${input.getAttribute("aria-owns") || ""}`.split(/\s+/).filter(Boolean);
     let boxes = ids.map((id) => document.getElementById(id)).filter(Boolean);
-    if (!boxes.length) boxes = Array.from(document.querySelectorAll("[role=listbox]")).filter(visible);
-    if (boxes.length !== 1) return [];
-    return Array.from(boxes[0].querySelectorAll("[role=option]")).filter(visible);
+    if (!boxes.length) boxes = Array.from(document.querySelectorAll("[role=listbox]")).filter((b) => visible(b) && !ownedByOther(b, input));
+    return boxes.length === 1 ? boxes[0] : null;
+  }
+  function ownedByOther(box, input) {
+    if (box.id)
+      for (const c of document.querySelectorAll("[aria-controls],[aria-owns]"))
+        if (c !== input && `${c.getAttribute("aria-controls") || ""} ${c.getAttribute("aria-owns") || ""}`.split(/\s+/).includes(box.id)) return true;
+    let e = box.parentElement;
+    while (e && !Array.from(e.querySelectorAll("[role=combobox]")).some((c) => !box.contains(c))) e = e.parentElement;
+    return !!e && !e.contains(input);
+  }
+  // The options of the open list. react-select before 5.8 gives its menu and options no roles, only ids made from the
+  // field's own instance ("react-select-country-listbox", "react-select-country-option-0"), which name them just as well.
+  function listOptions(input) {
+    const box = listboxOf(input);
+    const opts = box ? Array.from(box.querySelectorAll("[role=option]")).filter(visible) : [];
+    if (opts.length) return opts;
+    const ids = `${input.getAttribute("aria-controls") || ""} ${input.getAttribute("aria-owns") || ""}`.split(/\s+/);
+    const prefix = ids.map((id) => id.match(/^(react-select-.+)-listbox$/)?.[1]).find(Boolean);
+    if (!prefix || input.getAttribute("aria-expanded") !== "true") return [];
+    return Array.from(document.querySelectorAll(`[id^="${prefix.replace(/["\\]/g, "\\$&")}-option-"]`)).filter(visible);
+  }
+  // Whether a combobox's list is open: the field says so, or a list it owns is shown.
+  const listOpen = (input) => input.getAttribute("aria-expanded") === "true" || !!listboxOf(input);
+  // The nearest box around a combobox that holds no other one (react-select's container, with its log and buttons).
+  function ownBox(input) {
+    let best = null;
+    for (let box = input.parentElement, i = 0; box && i < 6 && box.querySelectorAll("[role=combobox]").length === 1; i++, box = box.parentElement) best = box;
+    return best;
+  }
+  // An async list still asking its server: "Loading..." in the list, or the field's own loading indicator.
+  function listLoading(input) {
+    const box = listboxOf(input);
+    if (box && !listOptions(input).length && /^(loading|searching)\b/i.test(norm(box.innerText))) return true;
+    return Array.from(ownBox(input)?.querySelectorAll("[class*='loading-indicator' i],[aria-busy=true]") || []).some(visible);
+  }
+  // What react-select's screen-reader log says was just chosen ("option United States +1, selected."), read from the
+  // nearest box around this combobox that holds no other one. Empty when there is no log or it says nothing (it is
+  // only written while the field has focus).
+  function saidChosen(input) {
+    let box = input.parentElement;
+    for (let i = 0; box && i < 6 && box.querySelectorAll("[role=combobox]").length === 1; i++, box = box.parentElement) {
+      const log = box.querySelector("[role=log]");
+      if (!log) continue;
+      const m = norm(log.textContent).match(/\boption (.+?), selected\./);
+      return m ? norm(m[1]) : "";
+    }
+    return "";
   }
   function press(el) {
     const o = { bubbles: true, cancelable: true, composed: true, button: 0, view: window };
@@ -1501,26 +1709,177 @@
     else input.value = v;
     input.dispatchEvent(new Event("input", { bubbles: true }));
   }
+  // The key a person's last keystroke of the typed text would have sent.
+  function lastKey(typed) {
+    const c = (String(typed).match(/[a-z0-9](?=[^a-z0-9]*$)/i) || ["a"])[0];
+    return { key: c, code: /\d/.test(c) ? `Digit${c}` : `Key${c.toUpperCase()}` };
+  }
+  // The button of the combobox's own control that opens its list (Greenhouse's "Toggle flyout"). It is looked for only
+  // in the nearest box around the field that holds a button, and never in one that also holds the field's label,
+  // another field or another combobox, so a button elsewhere on the form is never pressed. It must be tied to the list
+  // (it says it opens a popup or names one, or sits among the control's indicators), be named only for opening it,
+  // and be no switch or pressed toggle: never "Show my profile to other teams", "Open to relocation", "Locate me",
+  // anything that clears or removes, or a submit.
+  function listToggle(input) {
+    const labels = labelEls(input);
+    const others = (box) =>
+      Array.from(box.querySelectorAll("input,select,textarea,[role=combobox]")).some(
+        (x) => x !== input && typeOf(x) !== "hidden" && x.getAttribute("aria-hidden") !== "true" && x.tabIndex !== -1,
+      );
+    let box = input.parentElement;
+    for (let i = 0; box && i < 6; i++, box = box.parentElement) {
+      if (box.matches("form,fieldset,[role=group]") || labels.some((l) => box.contains(l)) || others(box)) return null;
+      if (box.querySelector("button,[role=button]")) break;
+    }
+    if (!box) return null;
+    const hits = Array.from(box.querySelectorAll("button,[role=button]")).filter((b) => {
+      const name = norm(`${b.getAttribute("aria-label") || ""} ${b.getAttribute("title") || ""} ${b.innerText || ""}`);
+      const tied = /^(true|listbox|menu)$/.test(b.getAttribute("aria-haspopup") || "") || b.hasAttribute("aria-expanded") || b.hasAttribute("aria-controls") || !!b.closest("[class*='indicator' i]");
+      return (
+        visible(b) &&
+        safeToClick(b) &&
+        tied &&
+        !b.matches("[aria-pressed],[aria-checked],[role=switch],[role=checkbox],[role=radio],[role=tab],[role=link]") &&
+        name.split(" ").length <= 3 &&
+        /toggle|open|show|expand|flyout|dropdown|options|menu/i.test(name) &&
+        !/clear|remove|delete|reset|locate|submit|apply/i.test(name)
+      );
+    });
+    return hits.length === 1 ? hits[0] : null;
+  }
+  // Opens a combobox's list in the ways a page may listen for, each tried only while the list is still shut, so
+  // nothing toggles it shut again: the typing itself (react-select's own menu), a key-up of the last letter typed
+  // (Greenhouse's select keeps its menu state itself and opens it on a key-up in the control), a mouse press on the
+  // field (its mouse-up toggles the menu), and last the field's own toggle button: pressed (react-select's indicator
+  // opens on the press), released, then clicked (Greenhouse's opens on the click). Never Enter.
+  async function openList(input, typed) {
+    const opened = () => waitFor(() => listOpen(input), 300, 50);
+    if (await opened()) return true;
+    const k = lastKey(typed);
+    input.dispatchEvent(new KeyboardEvent("keyup", { key: k.key, code: k.code, bubbles: true, cancelable: true }));
+    if (await opened()) return true;
+    const o = { bubbles: true, cancelable: true, composed: true, button: 0, view: window };
+    input.dispatchEvent(new MouseEvent("mousedown", o));
+    if (await opened()) return true;
+    input.dispatchEvent(new MouseEvent("mouseup", o));
+    if (await opened()) return true;
+    const t = listToggle(input);
+    if (!t) return false;
+    t.dispatchEvent(new MouseEvent("mousedown", o));
+    if (await opened()) return true;
+    t.dispatchEvent(new MouseEvent("mouseup", o));
+    if (await opened()) return true;
+    t.click();
+    return opened();
+  }
+  // Shuts a list ApplyPilot opened and leaves open, with Escape (a page whose select keeps its own menu state doesn't
+  // shut it when the field loses focus).
+  async function closeList(input) {
+    if (!listOpen(input)) return;
+    for (const type of ["keydown", "keyup"])
+      input.dispatchEvent(new KeyboardEvent(type, { key: "Escape", code: "Escape", keyCode: 27, bubbles: true, cancelable: true }));
+    await waitFor(() => !listOpen(input), 600, 50);
+  }
   // Picks the single option the approved answer names, then reads the field back. The retry opens the list
   // with ArrowDown and clicks again; it never sends Enter, which a page could treat as submitting the form.
-  async function chooseOption(input, typed, accept, readBack = accept) {
-    if (input.tagName !== "INPUT") return false;
+  // The field may show the choice as the option reads, as readBack accepts it, or in a shorter form made only of the
+  // option's own words with a code or flag that names it alone (a phone picker's "🇺🇸 +1", never a bare "+1");
+  // mustShow, when given, must hold for what it shows either way. A flag the field shows must be the chosen option's
+  // own. A screen-reader log that names a different option than the one clicked fails it. A page that checks a choice
+  // before taking it (a geocoder) shows it a few seconds after its list shut; that is waited for, and nothing is
+  // clicked a second time. A list that never opened is not tried a second time, and no attempt starts after until.
+  // When nothing could be chosen, the note says why without your details or the option chosen for you: "no list
+  // opened", "options seen 12, 0 matches", "the list was still loading", "chose 1 of 3 options, page shows '+44'".
+  // What the page shows is quoted only when it repeats neither the option chosen nor anything hide finds (your
+  // profile); quietText never quotes it (a place is near where you live). A click that was taken also returns check,
+  // which says whether the field has since come to show the choice (a geocoder slower than the wait).
+  async function chooseOption(input, typed, accept, { readBack = accept, mustShow = null, quietText = false, hide = null, until = Infinity } = {}) {
+    if (input.tagName !== "INPUT") return { ok: false, note: "" };
+    const seen = { opened: false, tried: false, options: 0, matches: 0, chose: "", drawn: "", shows: "", stuck: false, loading: false };
+    // react-select's log names the option clicked by its label, which may be shorter than the option as drawn
+    // ("option United States, selected." for "United States +1"). It fails the choice only when it names another
+    // option: one the list showed, or one with words the clicked option doesn't have.
+    const saidFits = (said, chosen, drawn, others) => {
+      if (!said) return true;
+      const s = simple(dialless(said));
+      if (s === simple(dialless(chosen))) return true;
+      if (others.some((o) => s === simple(dialless(o)))) return false;
+      const have = new Set(answerWords(drawn));
+      return answerWords(said).every((w) => have.has(w)) || shortFormOf(drawn, said);
+    };
+    const fits = (chosen, drawn, others) => {
+      const v = comboValue(input);
+      if (!v || (mustShow && !mustShow(v)) || !flagsAgree(drawn, v)) return false;
+      if (!(simple(v) === simple(chosen) || readBack(v) || shortFormOf(drawn, v))) return false;
+      return saidFits(saidChosen(input), chosen, drawn, others);
+    };
+    let check = null;
     for (let attempt = 0; attempt < 2; attempt++) {
+      if (Date.now() > until) break;
+      seen.tried = true;
       input.focus();
-      if (attempt === 0) typeInto(input, typed);
-      else input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", code: "ArrowDown", keyCode: 40, bubbles: true, cancelable: true }));
-      await waitFor(() => listOptions(input).length > 0, 3000, 100);
-      const hits = listOptions(input).filter((o) => accept(norm(o.textContent)));
+      if (attempt === 0) {
+        typeInto(input, typed);
+        if (await openList(input, typed)) seen.opened = true;
+      } else {
+        input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", code: "ArrowDown", keyCode: 40, bubbles: true, cancelable: true }));
+        // A list none of openList's ways opened gets ArrowDown once, briefly; it is not worked through again.
+        if (seen.opened) await openList(input, typed);
+        else if (await waitFor(() => listOpen(input), 300, 50)) seen.opened = true;
+        else break;
+      }
+      await waitFor(() => listOptions(input).length > 0 && !listLoading(input), seen.opened ? 3000 : 800, 100);
+      if (listLoading(input)) await waitFor(() => !listLoading(input), 6000, 100);
+      if (listboxOf(input) || listOptions(input).length) seen.opened = true;
+      seen.loading = listLoading(input);
+      const options = listOptions(input);
+      const hits = options.filter((o) => accept(norm(o.textContent)));
+      seen.options = Math.max(seen.options, options.length);
+      seen.matches = hits.length;
       if (hits.length !== 1 || !safeToClick(hits[0])) continue;
+      const chosen = norm(hits[0].textContent);
+      // The option as drawn, with any flag box in it ("🇺🇸 United States +1"), and the others the list showed.
+      const drawn = norm(`${flagsIn(hits[0], true)} ${chosen}`);
+      const others = options.filter((o) => o !== hits[0]).map((o) => norm(o.textContent));
       press(hits[0]);
-      if (await waitFor(() => !listOptions(input).length && readBack(comboValue(input)), 1000, 100)) {
+      let ok = await waitFor(() => !listOptions(input).length && fits(chosen, drawn, others), 1000, 100);
+      if (!ok && !listOptions(input).length && !comboValue(input)) ok = await waitFor(() => fits(chosen, drawn, others), 7000, 150);
+      if (ok) {
         input.blur();
-        return true;
+        return { ok: true, chosen };
+      }
+      seen.chose = chosen;
+      seen.drawn = drawn;
+      seen.shows = comboValue(input);
+      seen.stuck = listOptions(input).length > 0;
+      // The click was taken (the list shut): clicking again could choose twice.
+      if (!seen.stuck) {
+        check = () => (input.isConnected && !listOptions(input).length && fits(chosen, drawn, others) ? chosen : "");
+        break;
       }
     }
     if (norm(input.value)) typeInto(input, "");
+    await closeList(input);
     input.blur();
-    return false;
+    const quote = (t) => {
+      if (DIAL_ONLY.test(t)) return "only a dialling code";
+      const have = new Set(answerWords(seen.drawn)),
+        codes = codesFor(seen.chose);
+      const repeats = answerWords(t).some((w) => codes.has(w) || (have.has(w) && !/^\+\d+$/.test(w)));
+      return quietText || repeats || hide?.(t) ? "something else" : `'${clip(t, 40)}'`;
+    };
+    const shows = seen.stuck ? "the list stayed open" : `page shows ${!seen.shows ? "nothing" : quote(seen.shows)}`;
+    const note = !seen.tried
+      ? "ApplyPilot ran out of time"
+      : seen.chose
+        ? `chose 1 of ${seen.options} option${seen.options === 1 ? "" : "s"}, ${shows}`
+        : !seen.opened
+          ? "no list opened"
+          : !seen.options && seen.loading
+            ? "the list was still loading"
+            : `options seen ${seen.options}${seen.options ? `, ${seen.matches} match${seen.matches === 1 ? "" : "es"}` : ""}`;
+    // final: the list opened and the outcome won't change on another pass over the same field.
+    return { ok: false, note, check, final: seen.opened && !(seen.loading && !seen.options) };
   }
   // Yes/No answered with a pair of buttons. A pair is the nearest container holding exactly one Yes and one No.
   function choicePairs(root) {
@@ -1553,15 +1912,18 @@
   }
   const pairHasState = (p) => pressedOf(p.yes) !== null && pressedOf(p.no) !== null;
   const pairValue = (p) => (pressedOf(p.yes) === "true" ? p.yes : pressedOf(p.no) === "true" ? p.no : null);
+  // A pair's button is clicked only when both show a pressed state to read back, and never one that sends the form.
   async function clickChoiceButton(pair, answer) {
     const btn = answer ? pair.yes : pair.no,
       other = answer ? pair.no : pair.yes;
-    if (!pairHasState(pair) || !safeToClick(btn)) return false;
+    if (!pairHasState(pair)) return { ok: false, note: "the buttons show no pressed state" };
+    if (!safeToClick(btn)) return { ok: false, note: "the button would send the form" };
     if (pressedOf(btn) !== "true") {
       btn.click();
       await waitFor(() => pressedOf(btn) === "true", 1000, 100);
     }
-    return pressedOf(btn) === "true" && pressedOf(other) !== "true";
+    const ok = pressedOf(btn) === "true" && pressedOf(other) !== "true";
+    return ok ? { ok } : { ok, note: pressedOf(btn) === "true" ? "both buttons show pressed" : "the click didn't stick" };
   }
   function dropZoneFor(input, root, adapter) {
     for (const sel of adapter?.dropZone || []) {
@@ -1596,46 +1958,174 @@
   function resumeTaken(input, root, name) {
     return (nativeFileShown(input) && input.files?.[0]?.name === name) || resumeShown(input, root, name);
   }
+  // The question an upload belongs to: its group or fieldset when that holds no other upload, else its field box. It
+  // is read before the file is given, because a widget may take its input out of the page once it has the file
+  // (Greenhouse's newer form puts the file's name and a Remove button where the buttons and the input were).
+  function uploadBoxOf(input, root) {
+    const g = input.closest("[role=group],fieldset");
+    if (g && g !== root && root.contains(g) && g.querySelectorAll("input[type=file]").length === 1) return g;
+    return fieldBox(input, root);
+  }
+  // The upload box ApplyPilot gave this job's resume to, followed to the box a re-render put in its place.
+  function resumeBoxNow(scope) {
+    const r = state.resume;
+    if (!r || !scope) return null;
+    if (r.box.isConnected && scope.contains(r.box)) return r.box;
+    const by = r.labelId ? document.querySelector(`[aria-labelledby="${CSS.escape(r.labelId)}"]`) : null;
+    if (by && scope.contains(by)) r.box = by;
+    return r.box.isConnected && scope.contains(r.box) ? r.box : null;
+  }
+  const uploadError = (box) => /error|failed|could ?n[o']t|try again|too large|invalid/i.test(textOf(box));
+  // The widget shows this file's name, and nothing that says the upload failed or is still going.
+  const uploadShows = (box, name) => !!box && !!name && box.isConnected && textOf(box).includes(name) && !uploadError(box) && !busyIn(box);
+  const boxSig = (box) => `${box.isConnected}|${box.querySelectorAll("*").length}|${textOf(box)}`;
+  // The resume's entry when the widget took its input away: the box that shows the file's name stands for it.
+  function recordUpload(box, name) {
+    const label = norm(textOf(groupLabelEl(box))).replace(/[\s*:✱]+$/, "") || "Resume";
+    state.filled.set(box, { el: box, label: clip(label, 120), type: "file", required: true, value: clip(name, 200), source: "resume", hash: fnv1a(name), phone: "", upload: name });
+  }
+  // Why no upload reads as the resume: none in the form, or none named for it.
+  function missingResumeNote(root) {
+    const n = root.querySelectorAll("input[type=file]").length;
+    return n ? `${n} file upload${n === 1 ? "" : "s"}, none named resume or CV` : "the form has no file upload";
+  }
+  // The file types an upload says it takes (its accept list). A file it doesn't list is refused by the page ("Invalid
+  // file format selected."), so it is never given one.
+  function acceptsFile(input, file) {
+    const want = (input.getAttribute("accept") || "")
+      .split(",")
+      .map((x) => x.trim().toLowerCase())
+      .filter(Boolean);
+    if (!want.length) return true;
+    const ext = (file.name.match(/\.[a-z0-9]+$/i) || [""])[0].toLowerCase(),
+      type = (file.type || "").toLowerCase();
+    return want.some((w) => w === "*/*" || (w.startsWith(".") ? w === ext : w.endsWith("/*") ? type.startsWith(w.slice(0, -1)) : w === type));
+  }
   async function attachResume(root, adapter, resume, out, block) {
     const inputs = resumeInputs(root);
-    if (!inputs.length) return block("resume_field_missing"), null;
-    if (inputs.length > 1) return block("ambiguous_resume_field", null, inputs[1]), null;
+    if (!inputs.length) return block("resume_field_missing", null, null, noteFor("resume", missingResumeNote(root))), null;
+    if (inputs.length > 1) return block("ambiguous_resume_field", null, inputs[1], noteFor("resume", `${inputs.length} uploads read as the resume`)), null;
     const input = inputs[0];
     const hinted = hintMatches(root, adapter?.resumeInput);
-    if (hinted.length && (hinted.length !== 1 || hinted[0] !== input)) return block("adapter_mismatch", null, input), null;
+    if (hinted.length && (hinted.length !== 1 || hinted[0] !== input))
+      return block("adapter_mismatch", null, input, noteFor("resume", "the resume upload isn't the one ApplyPilot expects here")), null;
     out.resumeInputPath = cssPath(input);
-    if (!resume?.b64 || !resume.name) return block("resume_not_attached", null, input), input;
-    const cur = input.files?.[0];
-    if (!(cur && cur.name === resume.name && cur.size === resume.size)) {
-      const file = new File([bytesOf(resume.b64)], resume.name, { type: resume.type || "application/pdf" });
-      const dt = new DataTransfer();
-      dt.items.add(file);
+    if (!resume?.b64 || !resume.name) return block("resume_not_attached", null, input, noteFor("resume", "no resume file came with this job")), input;
+    const box = uploadBoxOf(input, root);
+    const zone = dropZoneFor(input, root, adapter);
+    const file = new File([bytesOf(resume.b64)], resume.name, { type: resume.type || "application/pdf" });
+    if (!acceptsFile(input, file)) {
+      const types = (input.getAttribute("accept") || "").split(",").map((x) => x.trim()).filter(Boolean).join(", ");
+      return block("resume_not_attached", null, input, noteFor("resume", `the upload takes only ${clip(types, 40)}`)), input;
+    }
+    state.resume = { box, labelId: box.getAttribute("aria-labelledby") || "", name: resume.name, size: file.size, taken: false };
+    const taken = () => (input.isConnected && nativeFileShown(input) && input.files?.[0]?.name === resume.name) || textOf(resumeBoxNow(root)).includes(resume.name);
+    const before = boxSig(box);
+    // Everything the page changes in the upload box from here on, attributes included (aria-busy, a progress bar's
+    // style). Any change made while the page handles ApplyPilot's change event shows its script took the file (React
+    // sets the input's type again as it handles one). An attribute of the input that the page sets again to the value
+    // it already had later, on its own, is kept apart: that is a framework taking the input over (React does it when it
+    // hydrates server-rendered markup), not an upload. ApplyPilot's own outline and marks on the input are not the page's.
+    let reacted = false,
+      handled = false,
+      lastChange = 0;
+    const inputAttrs = new Map();
+    const consume = (records, during = false) => {
+      for (const m of records) {
+        if (m.type === "attributes" && m.target === input && (m.attributeName === "style" || m.attributeName.startsWith("data-applypilot"))) continue;
+        if (during) {
+          handled = true;
+          continue;
+        }
+        lastChange = Date.now();
+        if (m.type === "attributes" && m.target === input) {
+          if (!inputAttrs.has(m.attributeName)) inputAttrs.set(m.attributeName, m.oldValue);
+        } else reacted = true;
+      }
+    };
+    const watch = new MutationObserver((records) => consume(records));
+    watch.observe(box, { subtree: true, childList: true, characterData: true, attributes: true, attributeOldValue: true });
+    const visibly = () => reacted || [...inputAttrs].some(([name, old]) => input.getAttribute(name) !== old);
+    const changed = () => handled || visibly();
+    const takenOver = () => inputAttrs.size > 0 && !changed();
+    let sent = 0;
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    const give = async () => {
+      sent++;
+      consume(watch.takeRecords());
       input.files = dt.files;
       input.dispatchEvent(new Event("input", { bubbles: true }));
       input.dispatchEvent(new Event("change", { bubbles: true }));
+      consume(watch.takeRecords(), true);
       mark(input, "#2f7df6");
-      // Only drop when the change event alone didn't take, so a widget that handles both doesn't get two files.
-      const zone = dropZoneFor(input, root, adapter);
-      const box = fieldBox(input, root);
-      if (zone && !(await waitFor(() => textOf(box).includes(resume.name), 1500, 100)))
+      // Only drop when the page didn't react to the change event at all, so a widget that handles both never gets two
+      // files. A widget that took the file may take seconds to show its name (Greenhouse's shows it once the upload
+      // answers, after taking its input and buttons away at once).
+      if (zone && !(await waitFor(() => taken() || !input.isConnected || changed() || boxSig(box) !== before, 1500, 100)))
         zone.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: dt }));
+    };
+    // A server-rendered form whose scripts hadn't taken it over yet ignored the file. It is given again once, and only
+    // when the page then visibly took the input over while nothing else in the box changed. A widget that shows
+    // nothing for a while, or only marks its box busy, is uploading: it never gets the file twice.
+    let calm = 0,
+      settled = false;
+    try {
+      const cur = input.files?.[0];
+      if (!(cur && cur.name === resume.name && cur.size === resume.size)) await give();
+      await sleep(300);
+      for (const end = Date.now() + 20000; Date.now() < end; ) {
+        if (taken() && !busyIn(resumeBoxNow(root) || box)) {
+          if (++calm >= 2) {
+            settled = true;
+            break;
+          }
+        } else {
+          calm = 0;
+          if (sent === 1 && input.isConnected && takenOver() && Date.now() - lastChange >= 500 && !busyIn(box)) await give();
+        }
+        await sleep(250);
+      }
+    } finally {
+      watch.disconnect();
     }
-    await sleep(300);
-    const box = fieldBox(input, root);
-    let calm = 0;
-    const settled = await waitFor(
-      () => {
-        const ok = resumeTaken(input, root, resume.name) && !busyIn(box);
-        calm = ok ? calm + 1 : 0;
-        return calm >= 2;
-      },
-      20000,
-      250,
-    );
-    if (!settled) return block("resume_not_attached", null, input), input;
-    input.dataset.applypilotFile = resume.name;
-    record(input, "resume");
-    return input;
+    if (!settled) {
+      const now = resumeBoxNow(root);
+      const note = !now
+        ? "the upload box went away"
+        : uploadError(now)
+          ? "the upload box shows an error"
+          : busyIn(now)
+            ? "the upload was still going"
+            : !visibly() && boxSig(box) === before
+              ? `the page never reacted to the file${sent > 1 ? ", given twice" : ""}`
+              : "the upload box never showed the file's name";
+      noteFor("resume", note);
+      return block("resume_not_attached", null, input, note), input;
+    }
+    state.resume.taken = true;
+    if (input.isConnected && root.contains(input)) {
+      input.dataset.applypilotFile = resume.name;
+      record(input, "resume");
+      // The question's own name ("Resume/CV"), since the input's label may be its button's ("Attach") or gone with it.
+      const named = box.matches("[role=group],fieldset") && norm(textOf(groupLabelEl(box))).replace(/[\s*:✱]+$/, "");
+      if (named) state.filled.get(input).label = clip(named, 120);
+      return input;
+    }
+    const shown = resumeBoxNow(root);
+    if (!shown) return block("resume_not_attached", null, null, noteFor("resume", "the upload box went away")), null;
+    recordUpload(shown, resume.name);
+    return shown;
+  }
+  // Why the fill gave up on a field ("options seen 0"), kept by element, id or name so the check's line for the same
+  // field reads the same and the two are shown once.
+  function noteFor(key, note) {
+    if (note !== undefined) {
+      state.notes.set(key, note);
+      if (key?.id) state.notes.set(`#${key.id}`, note);
+      return note;
+    }
+    return state.notes.get(key) ?? (key?.id ? state.notes.get(`#${key.id}`) : undefined) ?? "";
   }
   function hintMatches(root, sels) {
     for (const sel of sels || []) {
@@ -1667,13 +2157,40 @@
 
   // One pass over the form: everything after the resume. It only fills what is empty (and corrects your name, email
   // and phone), so running it again after the page wiped some answers redoes just those.
-  async function fillPass(root, resumeInput, { p, company, usPosting, allowPrivacyAck, coverLetter }) {
+  async function fillPass(root, resumeInput, { p, company, usPosting, allowPrivacyAck, coverLetter, until = Infinity }) {
     const blockers = [],
       flags = [];
-    const block = (code, label, el) => {
-      blockers.push(B(code, label));
+    const block = (code, label, el, note = "") => {
+      const b = B(code, label, note);
+      blockers.push(b);
       if (el) flags.push(el);
+      return b;
     };
+    // Dropdowns where typing opened no list at all: a page whose scripts hadn't taken the form over yet. The fill
+    // tries them again once the page has had time.
+    const dead = [];
+    // A dropdown whose list opened but that couldn't be chosen is kept with its line (state.tried), so a later pass
+    // doesn't spend its time on it again or click it a second time.
+    const gaveUp = (f, res, required, source) => {
+      if (res.note === "no list opened" && isCombo(f)) dead.push(f);
+      const b = required ? block(comboValue(f) ? "site_value_on_required" : "unanswered_required", labelOf(f), f, noteFor(f, res.note)) : (noteFor(f, res.note), null);
+      if (res.final) state.tried.set(f, { res, required, source, blocker: b });
+    };
+    // A dropdown an earlier pass gave up on: recorded when the page has since come to show the option chosen in it,
+    // else its line is given again, with nothing clicked.
+    const triedBefore = (f) => {
+      const prior = state.tried.get(f);
+      if (!prior) return false;
+      const chosen = prior.res.check?.();
+      if (chosen) {
+        state.tried.delete(f);
+        noteFor(f, "");
+        record(f, prior.source, undefined, chosen);
+      } else gaveUp(f, prior.res, prior.required, prior.source);
+      return true;
+    };
+    // Your own details are never quoted in a note on what a dropdown shows.
+    const hide = (t) => mentionsProfile(t, p);
 
     // 2. Cover letter: a text box is filled from the approved letter; a required file upload goes to you.
     const letter = String(coverLetter || "").trim();
@@ -1698,21 +2215,43 @@
         f.tagName === "SELECT" ? setSelectStrict(f, recordVariants(key, v), "record") : /Year$/.test(key) && !/^\d{4}$/.test(v) ? false : set(f, v),
     };
     const recordSkip = (f) => untouchable(f) || isCombo(f);
+    // Why a record field stays empty, for its line: no record left, nothing saved for it, or nothing it would take.
+    const missed = (kind, list) => (f, key, v, r) =>
+      noteFor(
+        f,
+        !r
+          ? `no ${list.length ? "further " : ""}${kind} in your profile`
+          : r.current && /^end/.test(key)
+            ? "a current job has no end date"
+            : !v
+              ? `nothing saved for it in your ${kind}`
+              : f.tagName === "SELECT"
+                ? `options seen ${optionCount(f)}, 0 matches`
+                : /Year$/.test(key)
+                  ? "your record's year isn't four digits"
+                  : "the page didn't take the value",
+      );
     // The batch gate is wider than the manual one, so a record field asking about you personally is still left alone.
-    fillSections(work, p.workHistory || [], onRecord, recordSkip, strict);
-    fillSections(edu, p.education || [], onRecord, recordSkip, strict);
+    fillSections(work, p.workHistory || [], onRecord, recordSkip, { ...strict, miss: missed("work history", p.workHistory || []) });
+    fillSections(edu, p.education || [], onRecord, recordSkip, { ...strict, miss: missed("education", p.education || []) });
 
     // 3-7. Text fields, native selects and radios, matched on each field's own label only.
     const authorized = typeof p.workAuthorized === "boolean" ? p.workAuthorized : null;
     const needsSponsor = typeof p.requiresSponsorship === "boolean" ? p.requiresSponsorship : null;
-    // Your flags are about the U.S.: a question that names no country is answered only for a U.S. posting.
-    const answerFor = (raw) => {
+    // Your flags are about the U.S.: a question that names no country is answered only for a U.S. posting. A work
+    // question left to you says why.
+    const answerWhy = (raw) => {
       const q = withoutCompany(String(raw ?? "").toLowerCase().replace(/\((required|optional)\)/g, " "), company);
       const aQ = AUTH_Q.test(q),
         sQ = SPON_Q.test(q);
-      if ((!aQ && !sQ) || !usWorkQuestion(q, aQ, sQ)) return null;
-      if (!usPosting && !namesUS(q)) return null;
-      return eligibility(q, aQ, sQ, authorized, needsSponsor);
+      if (!aQ && !sQ) return { a: null, note: "" };
+      if (!usWorkQuestion(q, aQ, sQ)) return { a: null, note: "asks more than whether you can work in the U.S." };
+      if (!usPosting && !namesUS(q)) return { a: null, note: "names no country, and the job isn't in the U.S." };
+      const a = eligibility(q, aQ, sQ, authorized, needsSponsor);
+      if (typeof a === "boolean") return { a, note: "" };
+      if ((sQ && needsSponsor === null) || (aQ && authorized === null))
+        return { a: null, note: `no ${sQ && needsSponsor === null ? "sponsorship" : "work authorization"} answer in your profile` };
+      return { a: null, note: "worded so a Yes or No could mean either" };
     };
     const skills = (Array.isArray(p.skills) ? p.skills : String(p.skills || "").split(","))
       .map((x) => String(x).trim())
@@ -1737,11 +2276,12 @@
         if (group.some((x) => doneRadios.has(x))) continue;
         group.forEach((x) => doneRadios.add(x));
         if (group.some((x) => x.checked)) continue;
-        const a = answerFor(question(f));
+        const { a, note } = answerWhy(question(f));
         if (typeof a === "boolean" && choice(f, a ? "yes" : "no")) {
           const c = group.find((x) => x.checked);
           if (c) record(c, "eligibility", "1");
-        }
+        } else if (typeof a === "boolean") noteFor(f, "no option reads just Yes or No");
+        else if (note) noteFor(f, note);
         continue;
       }
       if (norm(f.value)) continue;
@@ -1755,16 +2295,20 @@
         if (m) {
           const v = norm(p[m[0]]);
           if (v && setSelectStrict(f, variants(m[0], v))) record(f, "profile");
+          else noteFor(f, v ? `options seen ${optionCount(f)}, 0 matches` : `no ${KEY_WORDS[m[0]] || m[0]} in your profile`);
           continue;
         }
-        const a = answerFor(question(f) || lt.toLowerCase());
+        const { a, note } = answerWhy(question(f) || lt.toLowerCase());
         if (typeof a === "boolean" && setSelectStrict(f, [a ? "yes" : "no"], "answer")) record(f, "eligibility");
+        else if (typeof a === "boolean") noteFor(f, "no option reads just Yes or No");
+        else if (note) noteFor(f, note);
         continue;
       }
       if (!TEXTLIKE.includes(t)) continue;
       if (m) {
         const v = norm(p[m[0]]);
         if (v && setText(f, v)) record(f, "profile", v);
+        else noteFor(f, v ? "the page didn't take the value" : `no ${KEY_WORDS[m[0]] || m[0]} in your profile`);
         continue;
       }
       if (other) continue;
@@ -1776,8 +2320,9 @@
     }
 
     // 5. Comboboxes, only for fixed approved answers (country, state, Yes/No), with exact option match and read-back.
-    for (const f of combos) {
-      if (comboValue(f)) continue;
+    for (const el of combos) {
+      const f = live(el, root);
+      if (triedBefore(f) || comboValue(f)) continue;
       const lt = labelTexts(f).join(" ");
       if (forSomeoneElse(f, root)) continue;
       const m = profileField(f);
@@ -1793,7 +2338,7 @@
         accept = (t) => NOT_IN_US.test(t.toLowerCase());
       } else if (abroad) {
         // A U.S. state beside a country ApplyPilot doesn't read as the U.S.: which one is right is yours to say.
-        if (isRequired(f)) block("unanswered_required", labelOf(f), f);
+        if (isRequired(f)) block("unanswered_required", labelOf(f), f, noteFor(f, "a U.S. state with a country outside the U.S."));
         continue;
       } else if ((m && (m[0] === "country" || m[0] === "state")) || lives) {
         const key = m ? m[0] : lives;
@@ -1803,32 +2348,39 @@
         // A country is typed by its own name, so "USA" still finds "United States".
         typed = st ? US_STATES[st] : key === "country" ? countryName(p.country) : norm(p[key]);
         retry = st;
-        accept = (t) => wants.includes(dialless(t).toLowerCase());
+        // An option may start with its flag ("🇺🇸 United States +1").
+        accept = (t) => wants.includes(dialless(norm(t.replace(FLAGS, " "))).toLowerCase());
       } else if (!m || m[0] === "city") {
-        const a = answerFor(question(f) || lt.toLowerCase());
+        const { a, note } = answerWhy(question(f) || lt.toLowerCase());
         if (typeof a === "boolean") {
           wants = [a ? "yes" : "no"];
           source = "eligibility";
         } else if (profileField(f, LOCATION_FIELD)) {
           locations.push(f);
           continue;
-        }
-      }
+        } else if (note) noteFor(f, note);
+      } else noteFor(f, `ApplyPilot doesn't choose a ${KEY_WORDS[m[0]] || m[0]} from a list`);
       if (!accept) {
         if (!wants?.length) continue;
         accept = (t) => wants.includes(t.toLowerCase());
         typed = wants[0];
-      } else if (!typed) continue;
-      const ok = (await chooseOption(f, typed, accept)) || (!!retry && retry !== typed && (await chooseOption(f, retry, accept)));
-      if (ok) record(f, source);
-      else if (isRequired(f)) block("unanswered_required", labelOf(f), f);
+      } else if (!typed) {
+        noteFor(f, `no ${m ? m[0] : lives} in your profile`);
+        continue;
+      }
+      // The state's code is typed only after its name found a list that held no match.
+      let res = await chooseOption(f, typed, accept, { hide, until });
+      if (!res.ok && retry && retry !== typed && res.final && !res.check) res = await chooseOption(f, retry, accept, { hide, until });
+      if (res.ok) record(f, source, undefined, res.chosen);
+      else gaveUp(f, res, isRequired(f), source);
     }
 
     // 5b. Education dropdowns: the degree kind, the field of study and the school, each one exact option or none.
     {
       let i = 0,
         seen = new Set();
-      for (const f of edu.flatMap((r) => Array.from(r.querySelectorAll("input")))) {
+      for (const el of edu.flatMap((r) => Array.from(r.querySelectorAll("input")))) {
+        const f = live(el, root);
         if (!isCombo(f) || !allowed(f) || untouchable(f)) continue;
         const key = profileField(f, EDU_COMBOS)?.[0];
         if (!key) continue;
@@ -1838,8 +2390,11 @@
         }
         seen.add(key);
         const r = (p.education || [])[i];
-        if (!r || typeof r !== "object") break;
-        if (comboValue(f)) continue;
+        if (triedBefore(f) || comboValue(f)) continue;
+        if (!r || typeof r !== "object") {
+          noteFor(f, i ? "no further education in your profile" : "no education in your profile");
+          continue;
+        }
         const clean = (t) => norm(t).toLowerCase().replace(/[\u2018\u2019]/g, "'");
         let typed = "",
           accept = null;
@@ -1856,9 +2411,13 @@
             accept = (t) => clean(t) === want;
           }
         }
-        if (!accept || !typed) continue;
-        if (await chooseOption(f, typed, accept)) record(f, "record");
-        else if (key !== "school" && isRequired(f)) block("unanswered_required", labelOf(f), f);
+        if (!accept || !typed) {
+          noteFor(f, key === "degree" ? "no degree ApplyPilot can name in your record" : `no ${key === "field" ? "field of study" : key} in your record`);
+          continue;
+        }
+        const res = await chooseOption(f, typed, accept, { hide, until });
+        if (res.ok) record(f, "record", undefined, res.chosen);
+        else gaveUp(f, res, key !== "school" && isRequired(f), "record");
       }
     }
 
@@ -1877,16 +2436,22 @@
     for (const pair of choicePairs(root)) {
       const q = pair.question;
       if (DEMOGRAPHIC.test(q) || SENSITIVE.test(q) || sensitive.test(q) || ATTEST_CONTROL.test(q) || pairValue(pair)) continue;
-      const a = answerFor(q);
-      if (typeof a !== "boolean") continue;
-      if (await clickChoiceButton(pair, a)) record(a ? pair.yes : pair.no, "eligibility", "true");
-      else block("unverifiable_choice", pair.label, pair.field);
+      const { a, note } = answerWhy(q);
+      if (typeof a !== "boolean") {
+        if (note) noteFor(pair.yes, note);
+        continue;
+      }
+      const res = await clickChoiceButton(pair, a);
+      if (res.ok) record(a ? pair.yes : pair.no, "eligibility", "true");
+      else block("unverifiable_choice", pair.label, pair.field, res.note);
     }
 
     // 8. Required location autocomplete: one option whose place is your city, in your state. "Union City" is not
     // "Union", and "Graysonia" is not "Grayson".
-    for (const f of locations) {
-      if (!isRequired(f) || (isCombo(f) ? comboValue(f) : norm(f.value))) continue;
+    // What the field shows afterwards must still name your city; the note never names the places it saw.
+    for (const el of locations) {
+      const f = live(el, root);
+      if (!isRequired(f) || triedBefore(f) || (isCombo(f) ? comboValue(f) : norm(f.value))) continue;
       const city = norm(p.city),
         st = stateCode(p.state);
       const place = (t) => !!city && norm(t.split(",")[0]).toLowerCase() === city.toLowerCase();
@@ -1894,20 +2459,29 @@
         const rest = t.split(",").slice(1).join(",");
         return hasWord(rest, st) || hasWord(rest, US_STATES[st]);
       };
-      const ok = !!city && !!st && (await chooseOption(f, city, (t) => place(t) && inState(t), (v) => place(v)));
-      if (ok) record(f, "profile");
-      else block("unanswered_required", labelOf(f), f);
+      if (!city || !st) {
+        const why = !city ? "no city in your profile" : norm(p.state) ? "only places in the U.S. are chosen for you" : "no state in your profile";
+        block("unanswered_required", labelOf(f), f, noteFor(f, why));
+        continue;
+      }
+      // What the field shows afterwards must still be your city in your state: "Grayson, KY" is not Grayson, GA.
+      const here = (t) => place(t) && inState(t);
+      const res = await chooseOption(f, city, here, { readBack: here, mustShow: here, quietText: true, until });
+      if (res.ok) record(f, "profile", undefined, res.chosen);
+      else gaveUp(f, res, true, "profile");
     }
 
     // 9. Identity pass: a resume parser may have rewritten name, email or phone.
     identityPass(root, p, recordRoots);
-    return { blockers, flags };
+    return { blockers, flags, dead };
   }
 
   // Whether an answer ApplyPilot gave is still what the page shows. The audit uses the same test (R6).
   function held(entry, root) {
     const el = entry.el;
     if (!el.isConnected || !root.contains(el)) return false;
+    // A resume whose widget took the input away is held while its box still shows the file's name.
+    if (entry.upload) return textOf(el).includes(entry.upload) && !busyIn(el);
     const now = readFor(el);
     return entry.phone ? digits(now).endsWith(entry.phone) || (digits(now).length >= 7 && entry.phone.endsWith(digits(now))) : fnv1a(now) === entry.hash;
   }
@@ -1923,12 +2497,29 @@
     const lost = [];
     for (const entry of state.filled.values()) {
       // A file input may be emptied by its own widget once the upload is done; only a replaced one counts.
-      if (held(entry, root) || (entry.type === "file" && entry.el.isConnected && root.contains(entry.el))) continue;
+      if (held(entry, root) || (entry.type === "file" && !entry.upload && entry.el.isConnected && root.contains(entry.el))) continue;
       const el = entry.el;
       if (!el.isConnected || !root.contains(el) || blankNow(el) || profileField(el, IDENTITY)) lost.push(entry);
     }
     return lost;
   }
+  // A dropdown whose page confirmed the option ApplyPilot clicked only after it stopped waiting (a slow geocoder) is
+  // recorded once the field shows that option, and the line the fill gave for it goes. Nothing is clicked again.
+  function settleLate(pass, root) {
+    for (const [el, prior] of state.tried) {
+      const chosen = el.isConnected && (!root || root.contains(el)) && prior.res.check?.();
+      if (!chosen) continue;
+      state.tried.delete(el);
+      noteFor(el, "");
+      record(el, prior.source, undefined, chosen);
+      if (pass) {
+        pass.blockers = pass.blockers.filter((b) => b !== prior.blocker);
+        pass.flags = pass.flags.filter((x) => x !== el);
+      }
+    }
+  }
+  // The element in the page now for one collected a moment ago: itself, or the one a re-render put in its place.
+  const live = (el, root) => (el.isConnected ? el : (el.id && root.querySelector(`#${CSS.escape(el.id)}`)) || el);
   // The element a re-render put in place of one ApplyPilot filled: same id, or same name (and value, for a box).
   function twinOf(el, root) {
     let sel = "";
@@ -1947,8 +2538,8 @@
     state.fillFlagged = [];
     let resumeBlockers = [],
       resumeFlags = [];
-    const resumeBlock = (code, label, el) => {
-      resumeBlockers.push(B(code, label));
+    const resumeBlock = (code, label, el, note = "") => {
+      resumeBlockers.push(B(code, label, note));
       if (el) resumeFlags.push(el);
     };
     const finish = (pass) => {
@@ -1967,20 +2558,29 @@
       resumeBlock("form_not_found");
       return finish();
     }
-    const opts = { p: profile || {}, company, usPosting, allowPrivacyAck, coverLetter };
+    // No dropdown is started once fewer than 40 s are left, so the fill and its last checks end inside the budget.
+    const opts = { p: profile || {}, company, usPosting, allowPrivacyAck, coverLetter, until: deadline - 40000 };
     state.filled = new Map();
+    state.notes = new Map();
+    state.tried = new Map();
+    state.resume = null;
 
     // 1. This job's resume, then let any resume parser on the page finish. A site that reads the resume to fill the
     // form from it answers over the network, so that gets longer to land before anything is typed.
     let resumeInput = await attachResume(root, adapter, resume, out, resumeBlock);
     const taken = !!resumeInput && state.filled.has(resumeInput);
     await quiet(root, taken ? 2500 : 1000, taken ? 15000 : 5000);
+    // The page may have put a new form in place of the first one while the resume settled.
+    root = currentRoot(adapter) || root;
 
+    let started = Date.now();
     let pass = await fillPass(root, resumeInput, opts);
+    let passMs = Date.now() - started;
 
     // 10. Settle, then check that every answer is still there. A page that re-rendered (after a dropdown, or after it
-    // read the resume) can wipe what was typed; those answers are given again, at most twice. Two calm looks in a
-    // row end it, so a late wipe is still caught.
+    // read the resume) can wipe what was typed; those answers are given again, at most twice. So are dropdowns that
+    // opened no list at all, which a page does before its scripts have taken the form over. Two calm looks in a row
+    // end it, so a late wipe is still caught.
     let refills = 0,
       calm = 0;
     while (Date.now() < deadline - 5000) {
@@ -1989,12 +2589,15 @@
       await quiet(before, calm ? 2000 : 1500, Math.max(1000, Math.min(calm ? 6000 : 12000, deadline - Date.now() - 5000)));
       root = currentRoot(adapter);
       if (!root) break;
+      settleLate(pass, root);
       const lost = lostAnswers(root);
-      if (!lost.length) {
+      const again = (pass.dead || []).map((f) => live(f, root)).filter((f) => f.isConnected && root.contains(f) && !comboValue(f));
+      if (!lost.length && !again.length) {
         if (++calm >= 2) break;
         continue;
       }
-      if (refills >= 2 || Date.now() > deadline - 30000) break;
+      // Another pass is started only when the time left holds one as long as the last, and the checks after it.
+      if (refills >= 2 || Date.now() > deadline - Math.max(30000, passMs + 15000)) break;
       refills++;
       calm = 0;
       // A replaced element that still shows ApplyPilot's answer is the same answer; anything else is given again below.
@@ -2007,8 +2610,10 @@
           record(twin, entry.source, readFor(twin));
         } else replaced.push([entry.el, twin]);
       }
-      // The resume too: attached again if the page dropped it, or followed to a new input that still shows it.
+      // The resume too: attached again if the page dropped it, or followed to a new input, or to the new box of a
+      // widget that took its input away, that still shows it.
       const inputs = resumeInputs(root);
+      const box = inputs.length ? null : resumeBoxNow(root);
       if (resume?.name && inputs.length === 1) {
         const now = inputs[0];
         if (!resumeTaken(now, root, resume.name)) {
@@ -2023,11 +2628,18 @@
           record(now, "resume");
           resumeInput = now;
         }
+      } else if (resume?.name && box && state.resume?.taken && box !== resumeInput && textOf(box).includes(resume.name)) {
+        if (resumeInput) state.filled.delete(resumeInput);
+        recordUpload(box, resume.name);
+        resumeInput = box;
       }
+      started = Date.now();
       pass = await fillPass(root, resumeInput, opts);
+      passMs = Date.now() - started;
       // An answer given again to the new element replaces the old one; one that couldn't be stays, so the audit reports it.
       for (const [old, twin] of replaced) if (twin && state.filled.has(twin)) state.filled.delete(old);
     }
+    settleLate(pass, currentRoot(adapter));
     return finish(pass);
   }
 
@@ -2122,13 +2734,39 @@
     for (const v of vals) for (const w of variants("state", v)) out.add(w);
     return out;
   }
+  // A phone country picker that shows only a flag and a code ("🇺🇸 +1") is read as the flag's country, and one that
+  // shows a name and a code ("United States +1") as the name. A bare "+1" is no country.
   function equalsProfile(shownVals, p) {
     const pv = profileValues(p);
     const phone = digits(p?.phone);
-    return shownVals.some((v) => {
+    const named = (v) => {
+      const t = dialless(norm(String(v ?? "").replace(FLAGS, " ")));
+      return t !== norm(v) && /\p{L}/u.test(t) ? t : "";
+    };
+    return shownVals.flatMap((v) => [v, flagCountry(v), named(v)]).some((v) => {
       const t = norm(v).toLowerCase();
       return !!t && (pv.has(t) || (phone.length >= 7 && digits(t) === phone));
     });
+  }
+  // Whether a page's own text repeats something from your profile, so it is never quoted in a note.
+  function mentionsProfile(text, p) {
+    const t = norm(text).toLowerCase(),
+      d = digits(text),
+      phone = digits(p?.phone);
+    return [...profileValues(p)].some((v) => v.length >= 3 && t.includes(v)) || (phone.length >= 7 && d.includes(phone.slice(-7)));
+  }
+  // What an error the form shows says: its own text, or for a field marked invalid its error message, else its name.
+  function errorWords(el, p) {
+    const msg = (el.getAttribute("aria-errormessage") || "").split(/\s+/).filter(Boolean).map((id) => textOf(document.getElementById(id))).join(" ");
+    const t = norm(el.matches("input,select,textarea,[role=combobox]") ? msg || labelOf(el) : textOf(el));
+    return t && !mentionsProfile(t, p) ? t : "";
+  }
+  // Why the upload box doesn't prove the resume: an error, an upload still going, or not exactly the file's name.
+  function uploadNote(box, name) {
+    if (uploadError(box)) return "the upload box shows an error";
+    if (busyIn(box)) return "the upload was still going";
+    if (!textOf(box).includes(name)) return "the upload box doesn't show the file's name";
+    return exactTextIn(box, name) ? "" : "the upload box shows more than the file's name";
   }
   // Frames in the page and in open or closed shadow roots, since a challenge widget may live in either.
   function allFrames() {
@@ -2227,9 +2865,10 @@
   // the outermost one that isn't part of a field already checked, or of a combobox or upload's own box.
   const WIDGETS =
     "[aria-required=true],[role=radiogroup],[role=radio],[role=textbox],[role=listbox],[contenteditable=''],[contenteditable=true],button[aria-haspopup],[role=button][aria-haspopup],[aria-haspopup=listbox],canvas";
-  function widgetsIn(root, all) {
+  function widgetsIn(root, all, resumeBox = null) {
     const taken = all.flatMap((u) => u.els);
     const boxes = all.filter((u) => isCombo(u.first) || u.kind === "file").map((u) => fieldBox(u.first, root));
+    if (resumeBox) boxes.push(resumeBox);
     const found = [
       ...new Set(
         Array.from(root.querySelectorAll(WIDGETS), (w) => (w.getAttribute("role") === "radio" && !w.closest("[role=radiogroup]") ? w.parentElement : w)),
@@ -2250,7 +2889,8 @@
     const box = fieldBox(w.parentElement || w, root);
     let s = "";
     const walker = document.createTreeWalker(box, NodeFilter.SHOW_TEXT);
-    for (let n; (n = walker.nextNode()); ) if (!w.contains(n) && !n.parentElement?.closest("script,style,option")) s += " " + n.textContent;
+    for (let n; (n = walker.nextNode()); )
+      if (!w.contains(n) && !n.parentElement?.closest("script,style,option,[role=listbox],[role=log],.iti__dropdown-content")) s += " " + n.textContent;
     return norm(s).slice(0, 240);
   }
   const PICKED = "[aria-checked=true],[aria-selected=true],[aria-pressed=true]";
@@ -2274,8 +2914,17 @@
     const blockers = [],
       flagged = [],
       relax = new Set();
-    const add = (code, label, el, text) => {
-      blockers.push(text ? { code, text } : B(code, label));
+    // A field the fill gave up on keeps the fill's note, so both lines read the same and show once. why: the check's
+    // own note, where the fill left none.
+    const add = (code, label, el, text, why = "") => {
+      const note =
+        why ||
+        (["resume_not_attached", "resume_field_missing", "ambiguous_resume_field"].includes(code)
+          ? noteFor("resume")
+          : el && ["unanswered_required", "site_value_on_required"].includes(code)
+            ? noteFor(el)
+            : "");
+      blockers.push(text ? { code, text } : B(code, label, note));
       if (el) flagged.push(el);
     };
     const res = { blockers, flagged, relaxations: [], report: [], fingerprint: "", submitEl: null, resumeInput: null, resumeFile: null, verifiedBy: "" };
@@ -2303,11 +2952,15 @@
       return res;
     }
     if (window.top !== window) add("form_in_iframe");
+    // A choice the page confirmed after the fill stopped waiting for it is ApplyPilot's own answer, not the site's.
+    settleLate(null, root);
     if (ATTEST_TEXT.test(norm(root.innerText || ""))) add("attestation");
     if (multiStep(root)) add("multi_step");
 
     const resumeEls = resumeInputs(root);
     const resumeInput = resumeEls.length === 1 ? resumeEls[0] : null;
+    // The box ApplyPilot gave the resume to, which may no longer hold an input (R7 checks it).
+    const resumeBox = resumeEls.length ? null : resumeBoxNow(root);
     const all = units(root);
     for (const f of document.querySelectorAll("input,select,textarea"))
       if (!root.contains(f) && visible(f) && !["hidden", "submit", "button", "reset", "image"].includes(typeOf(f)))
@@ -2350,7 +3003,7 @@
       }
     }
 
-    for (const w of widgetsIn(root, all)) {
+    for (const w of widgetsIn(root, all, resumeBox)) {
       const label = widgetLabel(w, root);
       const name = label.replace(/[\s*:✱]+$/, "") || "Question";
       const req = w.getAttribute("aria-required") === "true" || STAR.test(label);
@@ -2381,7 +3034,7 @@
         continue;
       }
       if (u.kind === "pair" && req && !pairHasState(u.pair)) {
-        add("unverifiable_choice", unitLabel(u), u.pair.field);
+        add("unverifiable_choice", unitLabel(u), u.pair.field, "", "the buttons show no pressed state");
         continue;
       }
       if (!req) continue;
@@ -2404,11 +3057,27 @@
     for (const el of root.querySelectorAll("[data-applypilot-filled]"))
       if (!tracked.has(el) && fnv1a(readFor(el)) !== el.getAttribute("data-applypilot-filled")) add("value_reset", labelOf(el), el);
     const errs = errorsIn(root, adapter);
-    if (errs.length) add("validation_errors", null, errs[0]);
+    if (errs.length) add("validation_errors", null, errs[0], "", errorWords(errs[0], job?.profile));
 
-    // R7 this job's own resume
-    if (!resumeEls.length) add("resume_field_missing");
-    else if (resumeEls.length > 1) add("ambiguous_resume_field", null, resumeEls[1]);
+    // R7 this job's own resume. A widget that took its input away once it had the file passes only when ApplyPilot gave
+    // it this job's file (same name and size) in this page and the box still shows exactly that name, with no error
+    // and nothing still uploading.
+    if (!resumeEls.length) {
+      const want = job?.resume || {},
+        gave = state.resume;
+      if (resumeBox && gave?.taken && gave.name === want.name && gave.size === want.size && uploadShows(resumeBox, want.name) && exactTextIn(resumeBox, want.name))
+        res.verifiedBy = "chip";
+      else if (resumeBox)
+        add(
+          "resume_not_attached",
+          null,
+          resumeBox,
+          "",
+          !gave?.taken ? noteFor("resume") : gave.name !== want.name || gave.size !== want.size ? "the file given isn't this job's resume" : uploadNote(resumeBox, want.name),
+        );
+      else add("resume_field_missing", null, null, "", noteFor("resume") || missingResumeNote(root));
+    }
+    else if (resumeEls.length > 1) add("ambiguous_resume_field", null, resumeEls[1], "", `${resumeEls.length} uploads read as the resume`);
     else {
       const hinted = hintMatches(root, adapter?.resumeInput);
       if (hinted.length && (hinted.length !== 1 || hinted[0] !== resumeInput)) add("adapter_mismatch", null, resumeInput);
@@ -2417,7 +3086,8 @@
       if (f) {
         if (f.name !== want.name || f.size !== want.size) add("resume_mismatch", null, resumeInput);
         // A hidden input holding the file proves nothing until the page's own widget shows it.
-        else if (!nativeFileShown(resumeInput) && !resumeShown(resumeInput, root, want.name)) add("resume_not_attached", null, resumeInput);
+        else if (!nativeFileShown(resumeInput) && !resumeShown(resumeInput, root, want.name))
+          add("resume_not_attached", null, resumeInput, "", noteFor("resume") || "the page never showed the file's name");
         else {
           res.resumeFile = f;
           res.verifiedBy = "file";
@@ -2427,7 +3097,7 @@
         const boxText = textOf(box);
         if (want.name && exactTextIn(box, want.name) && !/error|failed|could ?n[o']t|try again|too large|invalid/i.test(boxText) && !busyIn(box))
           res.verifiedBy = "chip";
-        else add("resume_not_attached", null, resumeInput);
+        else add("resume_not_attached", null, resumeInput, "", noteFor("resume") || (state.resume?.taken ? uploadNote(box, want.name) || "the upload no longer holds the file" : "the upload holds no file"));
       }
     }
     for (const f of root.querySelectorAll("input[type=file]"))

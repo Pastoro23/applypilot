@@ -1,0 +1,39 @@
+<!doctype html>
+<!-- Greenhouse's newer application form, rendered by greenhouse-real.jsx with the real react-select and React
+     (served as /assets/greenhouse-real.js by scripts/test-extension.mjs). A test sets window.__gh in slot:config. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Job Application for Help Desk Technician at Acme Example</title>
+<style>
+  body { font: 15px/1.4 sans-serif; margin: 24px; }
+  .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .select__container { position: relative; }
+  .field-wrapper, .select { margin: 10px 0; }
+  .phone-input { display: flex; gap: 8px; border: 0; padding: 0; }
+  .phone-input__country { width: 140px; }
+</style>
+</head>
+<body>
+<header><a href="/acme">Acme Example</a></header>
+<main>
+  <h1 class="job__title">Help Desk Technician</h1>
+  <p class="job__location">Atlanta, GA</p>
+  <div id="app"></div>
+</main>
+<script>
+  window.__clicks = [];
+  window.__submits = 0;
+  document.addEventListener("click", (e) => {
+    const b = e.target.closest && e.target.closest("button,input,[role=button],a");
+    if (b) window.__clicks.push(b.id || b.textContent.trim());
+  }, true);
+  document.addEventListener("submit", (e) => {
+    e.preventDefault();
+    window.__submits++;
+  }, true);
+</script>
+<!--slot:config-->
+<script src="/assets/greenhouse-real.js"></script>
+</body>
+</html>
