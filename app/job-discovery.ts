@@ -171,6 +171,24 @@ const NON_US_PLACE = new RegExp(`\\b(${[
   "bangalore", "bengaluru", "hyderabad", "pune", "mumbai", "delhi", "manila", "sydney", "melbourne", "tokyo", "tel aviv",
 ].join("|")})\\b`, "i");
 
+// Titles that ask for a language other than English ("French Audio Specialist", "Language Partner (Arabic)").
+// They're left out unless the search itself names that language.
+const LANGUAGES = [
+  "afrikaans", "albanian", "amharic", "arabic", "armenian", "azerbaijani", "basque", "belarusian", "bengali", "bosnian",
+  "bulgarian", "burmese", "cantonese", "catalan", "chinese", "croatian", "czech", "danish", "dutch", "estonian", "farsi",
+  "filipino", "finnish", "flemish", "french", "georgian", "german", "greek", "gujarati", "hausa", "hebrew", "hindi",
+  "hungarian", "icelandic", "igbo", "indonesian", "italian", "japanese", "kannada", "kazakh", "khmer", "korean", "kurdish",
+  "lao", "latvian", "lithuanian", "macedonian", "malay", "malayalam", "maltese", "mandarin", "marathi", "mongolian",
+  "nepali", "norwegian", "pashto", "persian", "polish", "portuguese", "punjabi", "romanian", "russian", "serbian",
+  "sinhala", "slovak", "slovenian", "somali", "spanish", "swahili", "swedish", "tagalog", "tamil", "telugu", "thai",
+  "tigrinya", "turkish", "ukrainian", "urdu", "uzbek", "vietnamese", "welsh", "yoruba", "zulu",
+];
+
+export function otherLanguageInTitle(title: string, search: Pick<JobSearch, "titleWords" | "locations">) {
+  const wanted = `${search.titleWords} ${search.locations}`.toLowerCase();
+  return LANGUAGES.some((language) => has(title, language) && !has(wanted, language));
+}
+
 export function isNonUsOnly(location: string) {
   return NON_US_PLACE.test(location) && !US_PLACE.test(location);
 }
@@ -180,6 +198,7 @@ export function scoreJob(job: Pick<BoardJob, "title" | "location" | "postedAt">,
   const title = job.title.toLowerCase();
   const location = job.location.toLowerCase();
   if (phrases(search.excludeWords).some((word) => has(title, word))) return null;
+  if (otherLanguageInTitle(title, search)) return null;
   const titleWords = phrases(search.titleWords);
   const titleHit = titleWords.length === 0 || titleWords.some((word) => has(title, word));
   if (!titleHit) return null;

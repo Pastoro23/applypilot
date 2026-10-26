@@ -73,6 +73,9 @@ test('matches whole words in the title and the chosen places', () => {
   assert.ok((job('Help Desk Technician', 'Atlanta, GA') ?? 0) > (job('Help Desk Technician', 'Remote') ?? 0));
   assert.ok(job('Help Desk Technician', 'Remote - US'));
   assert.ok(job('Help Desk Technician', 'Remote (USA or Canada)'));
+  assert.equal(job('French Help Desk Technician', 'Remote'), null);
+  assert.equal(job('Help Desk Technician (Brazilian Portuguese)', 'Remote'), null);
+  assert.ok(scoreJob({ title: 'Spanish Help Desk Technician', location: 'Remote', postedAt: day(1) }, { ...search, titleWords: 'help desk, spanish' }, NOW));
   assert.equal(job('Help Desk Technician', 'Remote - UK'), null);
   assert.equal(job('Help Desk Technician', 'Remote, EMEA'), null);
   assert.equal(job('Help Desk Technician', 'Toronto, Canada · Remote'), null);

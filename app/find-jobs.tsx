@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { spreadByCompany } from "./match-order";
 
 // Find jobs: follow companies' Greenhouse, Lever and Ashby boards, list matching openings, add them to
 // Applications, and make a tailored resume for each added job automatically.
@@ -235,7 +236,7 @@ export function FindJobsView<T extends TailorTarget>({
     }
   }
 
-  const fresh = jobs.filter((job) => job.status === "new");
+  const fresh = spreadByCompany(jobs.filter((job) => job.status === "new"));
   const added = jobs.filter((job) => job.status === "queued");
   const resumeState = (job: FoundJob) => {
     const application = applications.find((item) => item.id === job.applicationId);
