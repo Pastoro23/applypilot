@@ -87,6 +87,7 @@ const DENIAL = {
   not_found: "ApplyPilot couldn't find this approval.",
   wrong_page: "The page didn't match the job you approved.",
   invalid_request: "ApplyPilot couldn't confirm this approval.",
+  attempt_closed: "ApplyPilot already gave this try back. Approve it again if it still needs sending.",
 };
 const TRANSPORT = new Set(["network", "timeout", "no_dashboard"]);
 
@@ -179,12 +180,32 @@ const REJECT = {
   pdfHash: "The resume file doesn't match the one you approved.",
   profile: "Your profile needs a first name, last name and email.",
   ledger: "ApplyPilot already pressed Submit for this job once. Check it before sending it again.",
+  sent: "This job was already submitted in Chrome. Check it before sending it again.",
   watch: "This job is open in a tab that needs you. Finish or close that tab first.",
   duplicate: "ApplyPilot is already sending this job.",
 };
 
+// Approvals Chrome saw submitted, whether or not the server has heard yet.
+export function sentApprovals(all) {
+  return new Set(
+    [
+      ...valuesWith(all, "apJob:").filter((r) => r.state === "done:submitted").map((r) => r.job?.approvalId),
+      ...valuesWith(all, "apOut:").filter((r) => r.outcome === "submitted").map((r) => r.approvalId),
+    ].filter(Boolean),
+  );
+}
+
+// The only way past a click: Peter said "It didn't go through" and approved the job again. Never past a
+// submission Chrome saw confirmed, even when the server hasn't heard of it yet.
+function ledgerRefusal(entry, job, sent) {
+  if (job.supersedesId && sent.has(job.supersedesId)) return REJECT.sent;
+  if (!isObject(entry)) return "";
+  if (job.supersedesId && entry.approvalId === job.supersedesId && entry.outcome !== "submitted") return "";
+  return entry.mode === "you" ? REJECT.sent : REJECT.ledger;
+}
+
 // Returns "" when the job may be queued, otherwise one plain sentence.
-export async function validateJob(job, { now, sha256, ledger, watchedKeys }) {
+export async function validateJob(job, { now, sha256, ledger, watchedKeys, sent = new Set() }) {
   if (!isObject(job) || !UUID.test(String(job.approvalId))) return REJECT.invalid;
   if (!str(job.applicationId, 80) || !str(job.jobKey, 200) || !isAts(job.ats)) return REJECT.invalid;
   if (typeof job.company !== "string" || typeof job.role !== "string" || job.company.length > 300 || job.role.length > 300)
@@ -223,21 +244,36 @@ export async function validateJob(job, { now, sha256, ledger, watchedKeys }) {
   const p = job.profile;
   if (!isObject(p) || !str(p.firstName, 200) || !str(p.lastName, 200) || !str(p.email, 320)) return REJECT.profile;
 
-  const entry = ledger(job.jobKey);
-  // The only way past a click: Peter said "It didn't go through" and approved the job again.
-  if (entry && (!job.supersedesId || entry.approvalId !== job.supersedesId)) return REJECT.ledger;
+  const refusal = ledgerRefusal(ledger(job.jobKey), job, sent);
+  if (refusal) return refusal;
   if (watchedKeys.has(job.jobKey)) return REJECT.watch;
   return "";
 }
 
-export async function acceptBatch(storage, batch, { now, sha256 }) {
+// tabUrl(tabId) gives a tab's URL, or null when the tab is gone. A watch whose tab closed while the runner
+// wasn't open is dropped here, so it can't refuse a job forever.
+export async function acceptBatch(storage, batch, { now, sha256, tabUrl = null }) {
   const accepted = [];
   const rejected = [];
   if (!isObject(batch) || !Array.isArray(batch.jobs) || batch.jobs.length < 1 || batch.jobs.length > LIMITS.batchJobs) {
     return { accepted, rejected: [{ approvalId: "", reason: REJECT.invalid }] };
   }
   const all = await storage.get(null);
-  const watchedKeys = new Set(valuesWith(all, "apWatch:").map((w) => w.jobKey));
+  const stale = [];
+  const watchedKeys = new Set();
+  for (const [key, w] of Object.entries(all || {})) {
+    if (!key.startsWith("apWatch:") || !isObject(w)) continue;
+    if (tabUrl) {
+      const url = await tabUrl(Number(key.slice("apWatch:".length)));
+      if (typeof url !== "string" || !isAllowedUrl(url) || parseAtsUrl(url)?.jobKey !== w.jobKey) {
+        stale.push(key);
+        continue;
+      }
+    }
+    watchedKeys.add(w.jobKey);
+  }
+  if (stale.length) await storage.remove(stale);
+  const sent = sentApprovals(all);
   const live = new Map();
   for (const rec of valuesWith(all, "apJob:")) {
     const id = rec.job?.approvalId;
@@ -252,7 +288,7 @@ export async function acceptBatch(storage, batch, { now, sha256 }) {
       accepted.push(id);
       continue;
     }
-    let reason = await validateJob(job, { now, sha256, ledger: (k) => all[KEYS.ledger(k)], watchedKeys });
+    let reason = await validateJob(job, { now, sha256, ledger: (k) => all[KEYS.ledger(k)], watchedKeys, sent });
     if (!reason && live.has(job.jobKey)) reason = REJECT.duplicate;
     if (reason) {
       rejected.push({ approvalId: id, reason });
@@ -482,6 +518,11 @@ export function createRunner(deps, opts = {}) {
     }
   }
   const closeTab = (tabId) => (typeof tabId === "number" ? quiet(tabs.remove(tabId)) : Promise.resolve());
+  // A saved tab id is that job's tab only while it shows that job: after a restart Chrome reuses ids.
+  async function liveTab(tabId, jobKey) {
+    const t = await tabInfo(tabId);
+    return Boolean(t && typeof t.url === "string" && isAllowedUrl(t.url) && parseAtsUrl(t.url)?.jobKey === jobKey);
+  }
 
   async function focusTab(tabId) {
     const t = await tabInfo(tabId);
@@ -546,12 +587,22 @@ export function createRunner(deps, opts = {}) {
 
   // ---- watches ----
 
-  async function addWatch(tabId, rec, kind, attemptId) {
+  // clickedBy is who pressed Submit in that tab so far; a later confirmation there is credited to them.
+  async function addWatch(tabId, rec, kind, attemptId, clickedBy = "you") {
     const t = await tabInfo(tabId);
     // A page ApplyPilot can't read (the company's own site) can't be watched.
     if (!t || !t.url || !isAllowedUrl(t.url)) return removeWatch(tabId);
     const j = rec.job;
-    const w = { approvalId: j.approvalId, applicationId: j.applicationId, jobKey: j.jobKey, ats: j.ats, attemptId: attemptId ?? null, kind, since: iso() };
+    const w = {
+      approvalId: j.approvalId,
+      applicationId: j.applicationId,
+      jobKey: j.jobKey,
+      ats: j.ats,
+      attemptId: attemptId ?? null,
+      kind,
+      clickedBy: clickedBy === "applypilot" ? "applypilot" : "you",
+      since: iso(),
+    };
     watches.set(tabId, w);
     await storage.set({ [KEYS.watch(tabId)]: w });
     if (kind !== "supervised") await rearm(tabId, w);
@@ -604,18 +655,35 @@ export function createRunner(deps, opts = {}) {
       finishedAt: iso(),
       extensionVersion: version,
       confirmationKind: clip(o.confirmationKind, 30),
+      // Whether the form at your click was the one ApplyPilot checked; null when ApplyPilot didn't see the click.
+      fingerprintMatched: typeof o.fingerprintMatched === "boolean" ? o.fingerprintMatched : null,
     };
+  }
+
+  // Every submission Chrome knows of, by you or by ApplyPilot, so a re-approval of that job is refused even while
+  // its result is still on its way to the server.
+  async function ledgerFor(rec, outcome, o) {
+    const j = rec.job;
+    const key = KEYS.ledger(j.jobKey);
+    const prev = await get1(key);
+    const entry =
+      isObject(prev) && prev.approvalId === j.approvalId
+        ? { ...prev }
+        : { clickedAt: iso(), approvalId: j.approvalId, applicationId: j.applicationId, attemptId: o.attemptId ?? null, mode: o.clickedBy === "applypilot" ? "auto" : "you" };
+    if (outcome === "submitted") entry.outcome = "submitted";
+    return { [key]: entry };
   }
 
   async function finish(rec, outcome, o = {}) {
     const result = makeResult(rec, outcome, o);
+    const ledger = outcome === "submitted" || outcome === "check" ? await ledgerFor(rec, outcome, o) : {};
     rec.state = `done:${outcome}`;
     rec.reasons = result.reasons;
     rec.finishedAt = result.finishedAt;
     rec.lastResultId = result.resultId;
     rec.job = withoutPdf(rec.job);
     rec.updatedAt = iso();
-    await storage.set({ [KEYS.out(result.resultId)]: result, [KEYS.job(rec.job.approvalId)]: rec });
+    await storage.set({ [KEYS.out(result.resultId)]: result, [KEYS.job(rec.job.approvalId)]: rec, ...ledger });
     track(rec);
     emit();
     quiet(bridge.notify("AP_PROGRESS", { approvalId: rec.job.approvalId, state: rec.state, note: STATE_LABELS[rec.state] || "" }));
@@ -628,7 +696,7 @@ export function createRunner(deps, opts = {}) {
       } else if (outcome === "cancelled") {
         await removeWatch(tabId);
         await closeTab(tabId);
-      } else await addWatch(tabId, rec, outcome, o.attemptId);
+      } else await addWatch(tabId, rec, outcome, o.attemptId, o.clickedBy === "applypilot" ? "applypilot" : "you");
     }
     return result;
   }
@@ -641,9 +709,11 @@ export function createRunner(deps, opts = {}) {
     return result;
   }
 
-  // A not_clicked from an earlier attempt must reach the server first, or the new claim is refused.
-  async function releasesDelivered(id) {
-    const pending = async () => valuesWith(await storage.get(null), "apOut:").some((r) => r.approvalId === id && r.outcome === "not_clicked");
+  // Every result for this job must reach the server before a claim: a not_clicked from an earlier attempt, or the
+  // news that you already submitted it in another tab, which revokes this approval.
+  async function releasesDelivered(rec) {
+    const { approvalId, jobKey } = rec.job;
+    const pending = async () => valuesWith(await storage.get(null), "apOut:").some((r) => r.approvalId === approvalId || r.jobKey === jobKey);
     if (!(await pending())) return true;
     await notifyResults();
     for (let i = 0; i < TIMES.releaseTries; i++) {
@@ -675,7 +745,15 @@ export function createRunner(deps, opts = {}) {
       if (PRE_CLAIM.has(rec.state) || rec.state === "claiming") await closeTab(rec.tabId);
       await saveJob(rec, { state: "paused", tabId: null, attemptId: null, claim: null });
     }
-    await writeRun({ state: "paused", pausedReason: why, pausedText: PAUSE_TEXT[why] || "", resumeAt: extra.resumeAt ?? null, current: null });
+    // A timed pause never outranks Stop: it would start sending again by itself.
+    const reason = extra.resumeAt != null && (await isHalted()) ? "halted" : why;
+    await writeRun({
+      state: "paused",
+      pausedReason: reason,
+      pausedText: PAUSE_TEXT[reason] || "",
+      resumeAt: reason === why ? extra.resumeAt ?? null : null,
+      current: null,
+    });
   }
 
   // ---- one job ----
@@ -756,7 +834,7 @@ export function createRunner(deps, opts = {}) {
     const j = rec.job;
     await saveJob(rec, { state: "claiming" });
     if (await isCancelled(j.approvalId)) throw new Abort("cancelled");
-    if (!(await releasesDelivered(j.approvalId))) {
+    if (!(await releasesDelivered(rec))) {
       await pauseRun(rec, "dashboard");
       return null;
     }
@@ -818,8 +896,9 @@ export function createRunner(deps, opts = {}) {
         return null;
       }
       if (TRANSPORT.has(reason)) {
-        // The request may have reached the server; give the claim back in case it was granted.
-        if (reason !== "no_dashboard") await release(rec, attemptId);
+        // The request may have reached the server, even when the frame that took it is gone; give the claim back in
+        // case it was granted. A release for a claim never granted changes nothing there.
+        await release(rec, attemptId);
         await pauseRun(rec, "dashboard");
         return null;
       }
@@ -905,7 +984,7 @@ export function createRunner(deps, opts = {}) {
     if (ev.type === "peter_click") {
       await saveJob(rec, { state: "observing", clickedBy: "you" });
       const out = await observe(rec, tabId);
-      return finish(rec, out.outcome, { ...out, clicked: false, clickedBy: "you", attemptId, tabId });
+      return finish(rec, out.outcome, { ...out, clicked: false, clickedBy: "you", attemptId, tabId, fingerprintMatched: ev.matches === true });
     }
     if (ev.type === "confirmed") {
       return finish(rec, "submitted", {
@@ -913,6 +992,7 @@ export function createRunner(deps, opts = {}) {
         clickedBy: "you",
         attemptId,
         tabId,
+        fingerprintMatched: null,
         pageUrl: ev.url,
         confirmationText: ev.text,
         confirmationKind: ev.confirmationKind,
@@ -987,12 +1067,11 @@ export function createRunner(deps, opts = {}) {
       if (await isCancelled(id)) return await markCancelled(rec);
       if (await isHalted()) return await pauseRun(rec, "halted");
       if (now() >= Date.parse(j.expiresAt)) return await finish(rec, "cancelled", { reasons: [R("expired", "Approval expired")], tabId: null });
-      const ledger = await get1(KEYS.ledger(j.jobKey));
-      if (ledger && (!j.supersedesId || ledger.approvalId !== j.supersedesId)) {
-        return await finish(rec, "needs_you", { reasons: [R("already_clicked", REJECT.ledger)], tabId: null });
-      }
+      const all = await storage.get(null);
+      const refusal = ledgerRefusal(all[KEYS.ledger(j.jobKey)], j, sentApprovals(all));
+      if (refusal) return await finish(rec, "needs_you", { reasons: [R("already_clicked", refusal)], tabId: null });
       for (const [watchedTab, w] of watches) {
-        if (w.jobKey === j.jobKey && w.approvalId !== id && (await tabInfo(watchedTab))) {
+        if (w.jobKey === j.jobKey && w.approvalId !== id && (await liveTab(watchedTab, w.jobKey))) {
           return await finish(rec, "needs_you", { reasons: [R("open_tab", REJECT.watch)], tabId: null });
         }
       }
@@ -1079,7 +1158,7 @@ export function createRunner(deps, opts = {}) {
   async function resumeWaiting(rec) {
     const tabId = rec.tabId;
     current.tabId = tabId;
-    if (!(await tabInfo(tabId))) {
+    if (!(await liveTab(tabId, rec.job.jobKey))) {
       return finish(rec, "needs_you", { reasons: [R("tab_closed", "Tab closed before you submitted")], attemptId: rec.attemptId, tabId: null });
     }
     if (await isHalted()) {
@@ -1171,23 +1250,23 @@ export function createRunner(deps, opts = {}) {
     for (const [key, w] of Object.entries(all)) {
       if (!key.startsWith("apWatch:") || !isObject(w)) continue;
       const tabId = Number(key.slice("apWatch:".length));
-      if (await tabInfo(tabId)) watches.set(tabId, w);
+      if (await liveTab(tabId, w.jobKey)) watches.set(tabId, w);
       else await quiet(storage.remove(key));
     }
     for (const rec of valuesWith(all, "apJob:")) {
       const id = rec.job?.approvalId;
       if (!id) continue;
       const marked = Boolean(all[KEYS.cancel(id)]);
-      const tabAlive = Boolean(await tabInfo(rec.tabId));
+      const tabAlive = await liveTab(rec.tabId, rec.job.jobKey);
       if (PENDING.has(rec.state)) {
         if (marked) await markCancelled(rec);
       } else if (["opening", "filling", "auditing"].includes(rec.state)) {
         // Nothing was clicked: start this one again from the beginning.
-        await closeTab(rec.tabId);
+        if (tabAlive) await closeTab(rec.tabId);
         await saveJob(rec, { state: marked ? "cancelled" : "queued", tabId: null, attemptId: null, claim: null });
       } else if (rec.state === "claiming") {
         if (rec.attemptId) await release(rec, rec.attemptId);
-        await closeTab(rec.tabId);
+        if (tabAlive) await closeTab(rec.tabId);
         await saveJob(rec, { state: marked ? "cancelled" : "queued", tabId: null, attemptId: null, claim: null });
       } else if (rec.state === "submitting" || rec.state === "observing") {
         const by = rec.state === "observing" && rec.clickedBy === "you" ? "you" : "applypilot";
@@ -1238,12 +1317,28 @@ export function createRunner(deps, opts = {}) {
     halted = value === true;
     if (halted) {
       for (const w of [...waiters]) w.resolve({ type: "halt" });
-      if (!running && runState.state !== "paused") await pauseRun(null, "halted");
+      // Also over a daily-limit or spacing pause, whose timer would otherwise start sending again.
+      if (!running || runState.state === "paused") await pauseRun(null, "halted");
       emit();
       return;
     }
     if (!running && runState.state === "paused") return run({ countdown: false });
     emit();
+  }
+
+  // The timer behind a daily-limit or spacing pause. It never clears Stop; only you do.
+  async function resumeAfterWait() {
+    if (await isHalted()) return;
+    const at = runState.resumeAt;
+    if (running || runState.state !== "paused" || typeof at !== "number" || at > now() + SECOND) return;
+    return run({ countdown: false });
+  }
+
+  // "Resume sending" on the dashboard. It goes out after every Approve & send too, so it only restarts a paused
+  // run; an idle one starts with its countdown as usual.
+  async function onResumeAsked() {
+    if (!running && runState.state === "paused") return resume();
+    return wake();
   }
 
   function pauseCountdown() {
@@ -1291,6 +1386,7 @@ export function createRunner(deps, opts = {}) {
       text: clip(msg.text, 300),
       fingerprint: clip(msg.fingerprint, 200),
       confirmationKind: clip(msg.confirmationKind, 30),
+      matches: msg.matches === true,
     };
     let delivered = false;
     for (const w of [...waiters]) {
@@ -1306,7 +1402,16 @@ export function createRunner(deps, opts = {}) {
       return true;
     }
     if (ev.kind === "confirmed") quiet(watchConfirmed(tabId, ev));
+    if (ev.kind === "peter_click") quiet(watchClicked(tabId));
     return true;
+  }
+
+  // You pressed Submit in a watched tab, so a confirmation that follows is yours, not ApplyPilot's.
+  async function watchClicked(tabId) {
+    const w = watches.get(tabId);
+    if (!w || w.clickedBy === "you") return;
+    w.clickedBy = "you";
+    await quiet(storage.set({ [KEYS.watch(tabId)]: w }));
   }
 
   // Peter finished a needs-you, check or skipped tab himself: record the real outcome.
@@ -1318,16 +1423,19 @@ export function createRunner(deps, opts = {}) {
     const key = KEYS.job(w.approvalId);
     const rec = (await storage.get(key))[key];
     if (!isObject(rec) || !rec.job) return;
-    const result = makeResult(rec, "submitted", {
-      clicked: false,
-      clickedBy: "you",
+    const by = w.clickedBy === "applypilot" ? "applypilot" : "you";
+    const o = {
+      clicked: by === "applypilot",
+      clickedBy: by,
       attemptId: w.attemptId ?? null,
       pageUrl: ev.url,
       confirmationText: ev.text,
       confirmationKind: ev.confirmationKind,
-    });
+      fingerprintMatched: false,
+    };
+    const result = makeResult(rec, "submitted", o);
     const next = { ...rec, state: "done:submitted", reasons: [], finishedAt: result.finishedAt, lastResultId: result.resultId, updatedAt: iso() };
-    await storage.set({ [KEYS.out(result.resultId)]: result, [key]: next });
+    await storage.set({ [KEYS.out(result.resultId)]: result, [key]: next, ...(await ledgerFor(rec, "submitted", o)) });
     track(next);
     emit();
     await notifyResults();
@@ -1357,6 +1465,8 @@ export function createRunner(deps, opts = {}) {
     start,
     run,
     resume,
+    resumeAfterWait,
+    onResumeAsked,
     stop,
     skip,
     wake,

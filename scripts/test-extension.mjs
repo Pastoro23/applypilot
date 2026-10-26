@@ -221,25 +221,36 @@ const SUBMITS = {
 };
 const field = (id, label, control) => `<div class="field"><label for="${id}">${label}</label>${control}</div>`;
 
-let reactBundle = null;
-async function buildReactBundle() {
-  if (reactBundle) return reactBundle;
-  const { build } = await import("vite");
-  const out = await build({
-    configFile: false,
-    logLevel: "silent",
-    root: fileURLToPath(FIXTURES),
-    define: { "process.env.NODE_ENV": '"production"' },
-    build: {
-      write: false,
-      minify: true,
-      rollupOptions: { input: fileURLToPath(new URL("react-form.js", FIXTURES)), output: { format: "iife", entryFileNames: "react-form.js" } },
-    },
-  });
-  reactBundle = (Array.isArray(out) ? out[0] : out).output[0].code;
-  return reactBundle;
+const bundles = new Map();
+// Bundles a React fixture with vite from the repo's own react and react-dom (bridge-hook.js also takes the
+// dashboard's real extension-bridge.ts).
+function bundle(name) {
+  if (!bundles.has(name))
+    bundles.set(
+      name,
+      (async () => {
+        const { build } = await import("vite");
+        const out = await build({
+          configFile: false,
+          logLevel: "silent",
+          root: fileURLToPath(FIXTURES),
+          define: { "process.env.NODE_ENV": '"production"' },
+          build: {
+            write: false,
+            minify: true,
+            rollupOptions: { input: fileURLToPath(new URL(name, FIXTURES)), output: { format: "iife", entryFileNames: name } },
+          },
+        });
+        return (Array.isArray(out) ? out[0] : out).output[0].code;
+      })(),
+    );
+  return bundles.get(name);
 }
-const ASSETS = { "/assets/combobox.js": () => fixture("combobox.js"), "/assets/react-form.js": buildReactBundle };
+const ASSETS = {
+  "/assets/combobox.js": () => fixture("combobox.js"),
+  "/assets/react-form.js": () => bundle("react-form.js"),
+  "/assets/bridge-hook.js": () => bundle("bridge-hook.js"),
+};
 
 async function page(ats, slots = {}) {
   let html = await fixture(`${ats}.html`);
@@ -962,6 +973,282 @@ test("installing twice keeps one library and its clicked flag", () =>
     const s = await p.evaluate((fp) => ({ same: window.__first === globalThis.__applypilot, again: globalThis.__applypilot.pressSubmit(fp), submits: window.__submits }), audit.fingerprint);
     assert.deepEqual([s.same, s.again.clicked, s.submits], [true, false, 1]);
   }));
+
+// ---- step 3 fixes: CAPTCHA in shadow roots, eligibility scope, group-level required, ARIA widgets ----------
+
+const REQ = '<span class="asterisk">*</span>';
+const reqRadios = (name, question, opts = ["Yes", "No"]) =>
+  `<div class="field"><fieldset><legend>${question}${REQ}</legend>${opts
+    .map((o, i) => `<label><input type="radio" name="${name}" id="${name}-${i}" value="${o}" required>${o}</label>`)
+    .join("")}</fieldset></div>`;
+const checkedIn = (p, name) => p.evaluate((name) => [...document.querySelectorAll(`input[name="${name}"]`)].filter((x) => x.checked).length, name);
+
+test("a visible CAPTCHA inside an open shadow root blocks, and pressSubmit refuses", () =>
+  using(
+    prepare("greenhouse", {
+      fields: `<captcha-box id="cb"></captcha-box>`,
+      script: `<script>document.getElementById("cb").attachShadow({ mode: "open" }).innerHTML = '<iframe src="https://newassets.hcaptcha.com/captcha/v1/abc/static/hcaptcha.html#frame=checkbox&id=0abc" width="303" height="78"></iframe>';</script>`,
+    }),
+    async ({ page: p, audit }) => {
+      assert.deepEqual(codes(audit), ["captcha"]);
+      assert.deepEqual(audit.relaxations, []);
+      const out = await press(p, audit.fingerprint);
+      assert.equal(out.r.clicked, false);
+      assert.equal(out.submits, 0);
+    },
+  ));
+
+test("a Turnstile box shown on the page blocks even when its frame is in a closed shadow root", () =>
+  using(
+    prepare("greenhouse", {
+      fields: `<div class="cf-turnstile" id="ts" data-sitekey="0x4AAA" style="width:300px;height:65px"></div>`,
+      script: `<script>document.getElementById("ts").attachShadow({ mode: "closed" }).innerHTML = '<iframe src="https://challenges.cloudflare.com/cdn-cgi/challenge-platform/turnstile/if/ov2/av0/abc" width="300" height="65"></iframe>';</script>`,
+    }),
+    async ({ audit }) => {
+      assert.deepEqual(codes(audit), ["captcha"]);
+      assert.deepEqual(audit.relaxations, []);
+    },
+  ));
+
+test("work authorization is answered only for working in the US, never other countries or other conditions", () =>
+  using(
+    prepare("greenhouse", {
+      fields:
+        reqRadios("q_us", "Are you legally authorized to work in the United States?") +
+        reqRadios("q_ca", "Are you legally authorized to work in Canada?") +
+        reqRadios("q_uk", "Do you have the right to work in the UK?") +
+        reqRadios("q_bg", "Do you authorize us to conduct a background check?") +
+        reqRadios("q_we", "Are you legally able to work weekends and overtime?") +
+        reqRadios("q_dr", "Are you authorized to drive a company vehicle?") +
+        field("q_sel", `Are you eligible to work in Mexico?${REQ}`, `<select id="q_sel" name="q_sel" aria-required="true"><option value="">Select</option><option>Yes</option><option>No</option></select>`),
+    }),
+    async ({ page: p, audit }) => {
+      const v = await values(p);
+      assert.equal(v["q_us-0"], true);
+      for (const name of ["q_ca", "q_uk", "q_bg", "q_we", "q_dr"]) assert.equal(await checkedIn(p, name), 0, name);
+      assert.equal(v.q_sel, "");
+      assert.ok(codes(audit).includes("unanswered_required"));
+      assert.equal(audit.blockers.filter((b) => b.code === "unanswered_required").length >= 6, true, JSON.stringify(audit.blockers));
+    },
+  ));
+
+test("required checkbox groups block: a demographic group, a starred acknowledgement and an aria-required group", async () => {
+  const cases = [
+    [
+      `<div class="field"><fieldset><legend>Race / Ethnicity${REQ}</legend><label><input type="checkbox" name="race" value="a">Asian</label><label><input type="checkbox" name="race" value="b">Black or African American</label><label><input type="checkbox" name="race" value="w">White</label></fieldset></div>`,
+      "demographic",
+    ],
+    [
+      `<div class="field"><fieldset><legend>Acknowledgement${REQ}</legend><label><input type="checkbox" name="ack" id="ack" value="1">I have read and agree to the candidate privacy notice</label></fieldset></div>`,
+      null,
+    ],
+    [
+      `<div class="field" role="group" aria-required="true" aria-labelledby="tools-l"><span id="tools-l">Which of these tools have you used?</span><label><input type="checkbox" name="tools" value="j">Jira</label><label><input type="checkbox" name="tools" value="s">ServiceNow</label></div>`,
+      "unanswered_required",
+    ],
+  ];
+  await Promise.all(
+    cases.map(([fields, code]) =>
+      using(prepare("greenhouse", { fields }), async ({ page: p, audit }) => {
+        assert.ok(audit.blockers.length, `${fields.slice(0, 60)} did not block`);
+        if (code) assert.ok(codes(audit).includes(code), JSON.stringify(codes(audit)));
+        assert.equal(await p.evaluate(() => document.querySelectorAll("input[type=checkbox]:checked").length), 0);
+      }),
+    ),
+  );
+});
+
+test("a Lever card with a starred label and one checkbox blocks; a group-level required cover letter file blocks", async () => {
+  await using(
+    prepare("lever", {
+      fields: `<li class="application-question"><div class="application-label">Please confirm you have read the job requirements<span class="required">✱</span></div><div class="application-field"><label><input type="checkbox" name="cards[c1][field0]" value="Yes">I confirm</label></div></li>`,
+    }),
+    async ({ page: p, audit }) => {
+      assert.ok(audit.blockers.length, "the starred card did not block");
+      assert.equal(await p.evaluate(() => document.querySelector("input[type=checkbox]").checked), false);
+    },
+  );
+  await using(
+    prepare("greenhouse", {
+      fields: `<div class="field" role="group" aria-labelledby="cl-l"><span id="cl-l">Cover Letter*</span><input id="cover_letter" name="cover_letter" type="file"></div>`,
+    }),
+    async ({ audit }) => assert.ok(codes(audit).includes("other_required_file") || audit.blockers.length, JSON.stringify(codes(audit))),
+  );
+});
+
+test("required ARIA widgets block: a radiogroup, a contenteditable box and a popup button", async () => {
+  const cases = [
+    [
+      `<div class="field"><span id="g-l">Gender${REQ}</span><div role="radiogroup" aria-labelledby="g-l"><div role="radio" aria-checked="false" tabindex="0">Male</div><div role="radio" aria-checked="false" tabindex="-1">Female</div></div></div>`,
+      "demographic",
+    ],
+    [
+      `<div class="field"><span id="s-l">Preferred shift</span><div role="radiogroup" aria-required="true" aria-labelledby="s-l"><div role="radio" aria-checked="false" tabindex="0">Mornings</div><div role="radio" aria-checked="false" tabindex="-1">Evenings</div></div></div>`,
+      "unanswered_required",
+    ],
+    [`<div class="field"><div role="textbox" contenteditable="true" aria-required="true" aria-label="Why do you want to work here?" style="min-height:40px;border:1px solid #999"></div></div>`, "unanswered_required"],
+    [
+      `<div class="field"><span id="st-l">Earliest start date${REQ}</span><button type="button" aria-haspopup="listbox" aria-labelledby="st-l" aria-required="true">Select…</button></div>`,
+      "unanswered_required",
+    ],
+  ];
+  await Promise.all(
+    cases.map(([fields, code]) =>
+      using(prepare("greenhouse", { fields }), async ({ audit }) => assert.ok(codes(audit).includes(code), `${fields.slice(0, 70)}: ${JSON.stringify(codes(audit))}`)),
+    ),
+  );
+});
+
+test("native selects take only an exact option: no 'Yes, I am a U.S. citizen', no Minor Outlying Islands, no 'Not in the US'", () =>
+  using(
+    prepare(
+      "greenhouse",
+      {
+        fields:
+          field("q_auth", `Are you legally authorized to work in the United States?${REQ}`, `<select id="q_auth" aria-required="true"><option value="">Select</option><option>Yes, I am a U.S. citizen</option><option>Yes, I have a work visa</option><option>No</option></select>`) +
+          field("country", `Country${REQ}`, `<select id="country" aria-required="true"><option value="">Select</option><option value="UM">United States Minor Outlying Islands</option><option value="US">United States of America</option><option value="CA">Canada</option></select>`) +
+          field("state", "State", `<select id="state"><option value="">Select</option><option value="xx">Not in the US</option><option value="IN">Indiana</option><option value="GA">Georgia</option></select>`),
+      },
+      { profile: { ...PROFILE, state: "IN" } },
+    ),
+    async ({ page: p, filled, audit }) => {
+      const v = await values(p);
+      assert.equal(v.q_auth, "");
+      assert.equal(v.country, "US");
+      assert.equal(v.state, "IN");
+      assert.ok(codes(audit).includes("unanswered_required"));
+      assert.ok(!filled.filled.some((x) => /citizen/.test(x.value)));
+    },
+  ));
+
+test("questions that only mention a profile word are not answered from the profile", () =>
+  using(
+    prepare("greenhouse", {
+      fields:
+        field("q_mdm", `Which mobile device management tools have you used?${REQ}`, `<input id="q_mdm" type="text" aria-required="true">`) +
+        field("q_region", `Which region would you like to work in?${REQ}`, `<input id="q_region" type="text" aria-required="true">`) +
+        field("q_story", `Describe a time you resolved a ticket by email${REQ}`, `<textarea id="q_story" aria-required="true"></textarea>`) +
+        field("q_email2", "Email address", `<textarea id="q_email2"></textarea>`) +
+        field("mobile", "Mobile phone", `<input id="mobile" type="tel">`),
+    }),
+    async ({ page: p, audit }) => {
+      const v = await values(p);
+      assert.deepEqual([v.q_mdm, v.q_region, v.q_story, v.q_email2], ["", "", "", ""]);
+      assert.equal(v.mobile, PROFILE.phone, "a real phone field is still filled");
+      assert.equal(audit.blockers.filter((b) => b.code === "unanswered_required").length, 3, JSON.stringify(audit.blockers));
+    },
+  ));
+
+test("batch fill ticks only a box that says this is your current job in work history", async () => {
+  const fields = `<div class="employment"><h3>Employment</h3>${field("company_0", "Company name", `<input id="company_0">`)}
+    <label><input type="checkbox" id="contact_ok"> You may contact my current employer</label>
+    <label><input type="checkbox" id="noncompete"> I am currently subject to a non-compete with my present employer</label>
+    <label><input type="checkbox" id="current_0"> I currently work here</label></div>`;
+  await using(prepare("greenhouse", { fields }, { profile: { ...PROFILE, workHistory: jobs } }), async ({ page: p }) => {
+    const v = await values(p);
+    assert.deepEqual([v.company_0, v.contact_ok, v.noncompete, v.current_0], ["Acme Health", false, false, true]);
+  });
+});
+
+test("real Lever cards (no fieldset) answer the US work-authorization radios", () =>
+  using(
+    prepare("lever", {
+      fields: `<li class="application-question custom-question"><div class="application-label"><div class="text">Are you legally authorized to work in the United States?<span class="required">✱</span></div></div>
+        <div class="application-field"><ul data-qa="multiple-choice"><li><label><input type="radio" name="cards[abc][field0]" id="lv-yes" value="Yes" required><span class="application-answer-alternative">Yes</span></label></li>
+        <li><label><input type="radio" name="cards[abc][field0]" id="lv-no" value="No" required><span class="application-answer-alternative">No</span></label></li></ul></div></li>`,
+    }),
+    async ({ page: p, audit }) => {
+      const v = await values(p);
+      assert.deepEqual([v["lv-yes"], v["lv-no"]], [true, false]);
+      assert.deepEqual(codes(audit), []);
+    },
+  ));
+
+test("a page with no form never reads as confirmed, even with success wording in the job description", async () => {
+  const posting = URLS.lever.replace(/\/apply$/, "");
+  const html = `<!doctype html><title>Acme Example - Help Desk Technician</title><div class="posting-headline"><h2>Help Desk Technician</h2></div>
+    <div class="section"><p>Thank you for applying to Acme! Once your application has been received, we review it within a week.</p></div>`;
+  const p = await open(posting, { [posting]: html });
+  try {
+    const form = await p.evaluate(() => globalThis.__applypilot.findForm({ ats: "lever", timeoutMs: 1000 }));
+    assert.equal(form.ok, false);
+    await p.evaluate(() => globalThis.__applypilot.watchForConfirmation({ ats: "lever" }));
+    const r = await outcome(p, "lever", 2000);
+    assert.notEqual(r.outcome, "submitted");
+    await p.waitForTimeout(500);
+    assert.equal(await p.evaluate(() => window.__sent.filter((m) => m.kind === "confirmed").length), 0);
+  } finally {
+    await p.close();
+  }
+});
+
+test("success wording on the page before Submit doesn't confirm a form that just went away", () =>
+  using(
+    prepare("greenhouse", {
+      top: `<p class="intro">Thank you for your application interest. Application received notices go out by email.</p><p>We have received your application questions? Email us.</p>`,
+      script: `<script>window.addEventListener("fixture-submit", () => { document.getElementById("application-form").remove(); });</script>`,
+    }),
+    async ({ page: p, audit }) => {
+      assert.deepEqual(codes(audit), []);
+      assert.deepEqual((await press(p, audit.fingerprint)).r, { clicked: true });
+      const r = await outcome(p, "greenhouse", 2500);
+      assert.equal(r.outcome, "check");
+    },
+  ));
+
+test("your own Submit click in a watched tab is reported, so a later confirmation is yours", () =>
+  using(prepare("greenhouse", { fields: GENDER(true) }), async ({ page: p, audit }) => {
+    assert.deepEqual(codes(audit), ["demographic"]);
+    await p.evaluate(() => globalThis.__applypilot.watchForConfirmation({ ats: "greenhouse" }));
+    await p.click("#submit");
+    await p.waitForFunction(() => window.__sent.some((m) => m.kind === "peter_click"), null, { timeout: 5000 });
+    const ev = await p.evaluate(() => window.__sent.find((m) => m.kind === "peter_click"));
+    assert.equal(ev.type, "AP_PAGE_EVENT");
+    assert.equal(ev.matches, false);
+    // A click the page script made itself is not yours.
+    await p.evaluate(() => {
+      window.__sent.length = 0;
+      document.getElementById("submit").click();
+    });
+    await p.waitForTimeout(200);
+    assert.equal(await p.evaluate(() => window.__sent.filter((m) => m.kind === "peter_click").length), 0);
+  }));
+
+test("dashboard hook: a hello sent before the bridge loaded doesn't turn a connected bridge into missing", async () => {
+  const url = "https://applypilot.example/applications";
+  const html = `<!doctype html><title>ApplyPilot</title><div id="app"></div>
+    <script>
+      // Stands in for bridge.js, which Chrome injects at document_idle: here 300 ms after the page's first hello,
+      // which nothing answers.
+      window.__hellos = 0;
+      let loaded = false, loading = false;
+      const reply = (type, payload, replyTo) => window.postMessage({ channel: "applypilot", v: 1, from: "extension", type, id: crypto.randomUUID(), replyTo, payload }, location.origin);
+      const READY = { version: "3.0.0", held: [], running: false, resultsWaiting: 0 };
+      window.addEventListener("message", (e) => {
+        const d = e.data;
+        if (!d || d.channel !== "applypilot" || d.from !== "dashboard") return;
+        if (!loaded) {
+          if (!loading) setTimeout(() => { loaded = true; reply("AP_READY", READY); }, 300);
+          loading = true;
+          return;
+        }
+        if (d.type === "AP_HELLO") { window.__hellos++; reply("AP_READY", READY, d.id); }
+        else if (d.type === "AP_PULL_RESULTS") reply("AP_RESULTS", { results: [] }, d.id);
+      });
+    </script>
+    <script src="/assets/bridge-hook.js"></script>`;
+  const p = await open(url, { [url]: html });
+  try {
+    await p.waitForFunction(() => document.getElementById("status")?.textContent === "connected", null, { timeout: 5000 });
+    await p.waitForTimeout(2600);
+    const s = await p.evaluate(() => ({ status: document.getElementById("status").textContent, seen: window.__statuses, hellos: window.__hellos }));
+    assert.equal(s.status, "connected", JSON.stringify(s.seen));
+    assert.ok(!s.seen.some(([, st]) => st === "missing"), JSON.stringify(s.seen));
+    assert.ok(s.hellos >= 1, "the page says hello itself once the bridge is there, so its tab can take claims");
+  } finally {
+    await p.close();
+  }
+});
 
 // ---- runner ---------------------------------------------------------------------------------------
 

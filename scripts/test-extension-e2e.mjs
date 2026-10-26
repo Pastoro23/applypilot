@@ -190,7 +190,19 @@ const DASHBOARD_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>
   });
   window.__hello = () => ask("AP_HELLO", {}, 5000);
   window.__send = (batch) => ask("AP_BATCH", { batch });
+  window.__resume = () => ask("AP_RESUME");
 })();
+</script></body></html>`;
+
+// Another page on the dashboard's origin without the page hook (an API response, a page still loading). bridge.js
+// runs there too, but no claim may go to it: nothing there would answer.
+const STRAY_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>ApplyPilot</title></head><body><pre>{"error":"Not found"}</pre>
+<script>
+  window.__claims = 0;
+  window.addEventListener("message", (e) => {
+    const d = e.data;
+    if (d && d.channel === "applypilot" && d.from === "extension" && d.type === "AP_CLAIM") window.__claims++;
+  });
 </script></body></html>`;
 
 // ---- the browser -------------------------------------------------------------------------------------------
@@ -210,6 +222,7 @@ await context.route(`${DASHBOARD}/**`, async (route) => {
   const req = route.request();
   const url = new URL(req.url());
   if (req.method() === "GET" && url.pathname === "/") return route.fulfill({ contentType: "text/html", body: DASHBOARD_HTML });
+  if (req.method() === "GET" && url.pathname === "/stray") return route.fulfill({ contentType: "text/html", body: STRAY_HTML });
   if (req.method() !== "POST" || !url.pathname.startsWith("/api/submissions/")) return route.fulfill({ status: 404, body: "Not found" });
   if (!/^application\/json\s*(;|$)/i.test(req.headers()["content-type"] ?? "")) return route.fulfill({ status: 415, json: { error: "Send JSON." } });
   try {
@@ -284,7 +297,12 @@ function findPage(urlPart) {
 const steps = [];
 const step = (name, f) => steps.push([name, f]);
 
+let stray = null;
 step("supervised: nothing is sent until you click Submit, then it's recorded as yours", async () => {
+  // Opened after the dashboard, so it is the newest dashboard-origin tab; the claim still goes to the dashboard.
+  stray = await context.newPage();
+  await stray.goto(`${DASHBOARD}/stray`);
+  await dash.bringToFront();
   const job = greenhouseJob("4012345");
   addApplication("app-gh", job.url);
   const [item] = await approve(["app-gh"]);
@@ -305,16 +323,23 @@ step("supervised: nothing is sent until you click Submit, then it's recorded as 
   assert.equal(postsTo(job.post), 1);
   assert.equal(row(item.approvalId).clicked_by, "you");
   assert.equal(appStatus("app-gh"), "applied");
-  assert.equal((await extStorage())[`apLedger:${item.jobKey}`], undefined, "only automatic clicks write the ledger");
+  // Your click is in Chrome's ledger too, so no re-approval of this job can be clicked before the server hears of it.
+  const ledger = (await extStorage())[`apLedger:${item.jobKey}`];
+  assert.deepEqual([ledger?.approvalId, ledger?.mode, ledger?.outcome], [item.approvalId, "you", "submitted"]);
+  assert.ok(events(item.approvalId).includes("calibrated"), "your click on the checked form, confirmed: it counts toward automatic clicks");
+  assert.equal(await stray.evaluate(() => window.__claims), 0, "the tab without the page hook never got the claim");
 });
 
 let autoJob = null;
 step("auto enabled after 3 confirmed supervised submissions: a clean job gets exactly 1 POST and is submitted", async () => {
   // Two earlier supervised Lever submissions you clicked yourself, plus one more below, unlock automatic clicks there.
   for (let i = 0; i < 3; i++) {
+    const id = randomUUID();
     sqlite.prepare(`INSERT INTO submissions (id, owner_email, application_id, job_key, ats, apply_url, tailored_revision, profile_hash,
       state, approved_at, expires_at, claim_mode, clicked_by, updated_at) VALUES (?, ?, ?, ?, 'lever', '', 1, '', 'submitted', ?, ?, 'supervised', 'you', ?)`)
-      .run(randomUUID(), OWNER, `old-${i}`, `lever:old:${i}`, "2026-09-01T00:00:00.000Z", "2026-09-02T00:00:00.000Z", "2026-09-01T00:00:00.000Z");
+      .run(id, OWNER, `old-${i}`, `lever:old:${i}`, "2026-09-01T00:00:00.000Z", "2026-09-02T00:00:00.000Z", "2026-09-01T00:00:00.000Z");
+    sqlite.prepare(`INSERT INTO submission_events (id, owner_email, submission_id, at, actor, event, detail_json)
+      VALUES (?, ?, ?, ?, 'server', 'calibrated', '{}')`).run(`${id}:calibrated`, OWNER, id, "2026-09-01T00:00:00.000Z");
   }
   await store.saveSettings(db, OWNER, { auto: { greenhouse: false, lever: true, ashby: false }, dailyCap: 10, allowInvisibleCaptcha: true, allowOptionalSensitiveBlank: true });
   const job = leverJob(randomUUID());
@@ -402,6 +427,30 @@ step("an approval you revoke before the claim gets 0 POSTs and its tab is closed
   assert.deepEqual(claims.filter((c) => c.approvalId === item.approvalId).map((c) => c.result), [{ ok: false, reason: "revoked" }]);
   assert.equal(row(item.approvalId).state, "revoked");
   await until(() => !findPage(job.path), "the tab to close", 10000);
+});
+
+step("Pause in the countdown, then Resume sending on the dashboard: the run starts again and waits for your click", async () => {
+  const job = greenhouseJob("4012399");
+  addApplication("app-resume", job.url);
+  const [item] = await approve(["app-resume"]);
+  assert.deepEqual(await send(await batchFor([item])), { accepted: [item.approvalId], rejected: [] });
+  const runner = await until(() => findPage(`chrome-extension://${extensionId}/runner.html`), "the runner page", 20000);
+  await runner.locator("#pause").click({ timeout: 15000 });
+  await until(async () => (await extStorage()).apRun?.pausedReason === "countdown", "the countdown pause", 20000);
+  await sleep(1500);
+  assert.equal(claims.filter((c) => c.approvalId === item.approvalId).length, 0, "nothing claimed while paused");
+  assert.notEqual((await extStorage()).apHalt, true, "Stop was never pressed, so resuming changes nothing in apHalt");
+  await dash.evaluate(() => window.__resume());
+  const form = await until(async () => {
+    const p = findPage(job.path);
+    const outline = p ? await p.evaluate(() => document.querySelector("#submit")?.style.outline || "").catch(() => "") : "";
+    return outline.includes("solid") ? p : null;
+  }, "the highlighted Submit button after resuming");
+  clickedByTest.add(job.post);
+  await form.click("#submit");
+  await until(() => row(item.approvalId).state === "submitted", "the resumed submission");
+  assert.equal(postsTo(job.post), 1);
+  assert.equal(row(item.approvalId).clicked_by, "you");
 });
 
 step("closing the runner while it submits gives check on reopening, at most 1 POST, never a second click", async () => {

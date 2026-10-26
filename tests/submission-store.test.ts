@@ -4,7 +4,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { autofillProfileFromRow, buildAutofillProfile, profileHash } from '../app/profile-records.ts';
 import {
   approveForSubmit, cancelSubmissions, claimSubmission, listSubmissions, loadSettings, recordResults, resolveSubmission,
-  saveSettings, submissionsPage, targetsFor, type ApprovedItem,
+  saveSettings, submissionsPage, targetsFor, type ApprovedItem, type ClaimResult,
 } from '../app/submission-store.ts';
 import { UserFacingError } from '../app/errors.ts';
 import { testDatabase } from './sqlite-helper.ts';
@@ -80,11 +80,16 @@ async function claimed(db: ReturnType<typeof testDatabase>['db'], item: Approved
 // Three supervised submissions Peter clicked himself and ApplyPilot saw confirmed.
 function calibrate(sqlite: DatabaseSync, ats: string, n = 3) {
   for (let i = 0; i < n; i++) {
+    const id = crypto.randomUUID();
     sqlite.prepare(`INSERT INTO submissions (id, owner_email, application_id, job_key, ats, apply_url, tailored_revision, profile_hash,
       state, approved_at, expires_at, claim_mode, clicked_by, updated_at) VALUES (?, ?, ?, ?, ?, '', 1, '', 'submitted', ?, ?, 'supervised', 'you', ?)`)
-      .run(crypto.randomUUID(), OWNER, `old-${ats}-${i}`, `${ats}:old:${i}`, ats, iso(NOW - 40 * 86_400_000), iso(NOW), iso(NOW - 40 * 86_400_000));
+      .run(id, OWNER, `old-${ats}-${i}`, `${ats}:old:${i}`, ats, iso(NOW - 40 * 86_400_000), iso(NOW), iso(NOW - 40 * 86_400_000));
+    sqlite.prepare(`INSERT INTO submission_events (id, owner_email, submission_id, at, actor, event, detail_json)
+      VALUES (?, ?, ?, ?, 'server', 'calibrated', '{}')`).run(`${id}:calibrated`, OWNER, id, iso(NOW - 40 * 86_400_000));
   }
 }
+
+const calibration = async (db: ReturnType<typeof testDatabase>['db']) => (await submissionsPage(db, OWNER, NOW + HOUR)).calibration;
 
 const settings = (extra: Record<string, unknown> = {}) => ({
   auto: { greenhouse: false, lever: false, ashby: false }, dailyCap: 10, allowInvisibleCaptcha: true, allowOptionalSensitiveBlank: true, ...extra,
@@ -143,8 +148,13 @@ test('approve is idempotent within 24 hours and replaces a stale approval', asyn
 
   // The resume was re-tailored: the old approval is replaced.
   sqlite.prepare("UPDATE applications SET tailored_revision = 2 WHERE id = 'a1'").run();
-  const second = await approveOne(db, 'a1', NOW + 2 * HOUR, 2);
+  const replacing = await approveForSubmit(db, OWNER, [{ applicationId: 'a1', revision: 2 }], { includeCoverLetter: true, now: NOW + 2 * HOUR });
+  const second = replacing.approved[0];
   assert.notEqual(second.approvalId, first.approvalId);
+  // The dashboard cancels the replaced approval in Chrome, or Chrome refuses the new one as a duplicate.
+  assert.deepEqual(replacing.replaced, [first.approvalId]);
+  const reused = await approveForSubmit(db, OWNER, [{ applicationId: 'a1', revision: 2 }], { includeCoverLetter: true, now: NOW + 2 * HOUR });
+  assert.deepEqual(reused.replaced, [], 'nothing replaced when the approval is reused');
   assert.equal(state(sqlite, first.approvalId), 'revoked');
   assert.equal((sqlite.prepare('SELECT reason FROM submissions WHERE id = ?').get(first.approvalId) as { reason: string }).reason, 'Replaced by a new approval');
   // The profile changed: replaced again.
@@ -457,7 +467,7 @@ test('results: a watched tab records your own submission from needs_you, revoked
   assert.equal(appStatus(sqlite, 'r'), 'applied');
 });
 
-test('resolve works only on check rows or claims older than 15 minutes', async () => {
+test('resolve works only on check rows or stale claims: 15 minutes, or 35 for a supervised claim waiting on your click', async () => {
   const { sqlite, db } = setup();
   for (const id of ['a', 'b', 'c']) addApp(sqlite, id, ghUrl(id.charCodeAt(0)));
   const a = await approveOne(db, 'a');
@@ -466,7 +476,9 @@ test('resolve works only on check rows or claims older than 15 minutes', async (
   await assert.rejects(resolveSubmission(db, OWNER, a.approvalId, 'submitted', NOW), (e: unknown) => e instanceof UserFacingError && e.status === 409);
   const attemptB = await claimed(db, b);
   await assert.rejects(resolveSubmission(db, OWNER, b.approvalId, 'not_sent', NOW + 5 * MIN), UserFacingError);
-  const stale = await resolveSubmission(db, OWNER, b.approvalId, 'not_sent', NOW + 16 * MIN);
+  // Chrome waits up to 30 minutes for your click on a supervised claim.
+  await assert.rejects(resolveSubmission(db, OWNER, b.approvalId, 'not_sent', NOW + 20 * MIN), UserFacingError);
+  const stale = await resolveSubmission(db, OWNER, b.approvalId, 'not_sent', NOW + 36 * MIN);
   assert.equal(stale?.state, 'not_sent');
   assert.equal(appStatus(sqlite, 'b'), 'saved');
   void attemptB;
@@ -477,8 +489,132 @@ test('resolve works only on check rows or claims older than 15 minutes', async (
   await assert.rejects(resolveSubmission(db, OWNER, c.approvalId, 'not_sent', NOW + 4 * MIN), UserFacingError);
   assert.ok(events(sqlite, c.approvalId).includes('resolved:submitted'));
   // "It didn't go through" lets you approve again; the new approval names the one it supersedes.
-  const again = await approveOne(db, 'b', NOW + 20 * MIN);
+  const again = await approveOne(db, 'b', NOW + 40 * MIN);
   assert.equal(again.supersedesId, b.approvalId);
+});
+
+test('an automatic claim goes stale after 15 minutes', async () => {
+  const { sqlite, db } = setup();
+  calibrate(sqlite, 'greenhouse');
+  await saveSettings(db, OWNER, settings({ auto: { greenhouse: true, lever: false, ashby: false } }), NOW);
+  addApp(sqlite, 'a', ghUrl(1));
+  const a = await approveOne(db, 'a');
+  assert.deepEqual(await claimSubmission(db, OWNER, claimOf(a), NOW), { ok: true, mode: 'auto' });
+  assert.equal((await resolveSubmission(db, OWNER, a.approvalId, 'not_sent', NOW + 16 * MIN))?.state, 'not_sent');
+});
+
+test('a late submitted result from ApplyPilot\'s click wins over "It didn\'t go through" and revokes the re-approval', async () => {
+  const { sqlite, db } = setup();
+  addApp(sqlite, 'a', ghUrl(1));
+  const first = await approveOne(db, 'a');
+  const attempt = await claimed(db, first);
+  await resolveSubmission(db, OWNER, first.approvalId, 'not_sent', NOW + 36 * MIN);
+  const again = await approveOne(db, 'a', NOW + 37 * MIN);
+  assert.equal(again.supersedesId, first.approvalId);
+  await recordResults(db, OWNER, [resultOf(first, attempt, 'submitted')], NOW + 38 * MIN);
+  assert.equal(state(sqlite, first.approvalId), 'submitted');
+  assert.equal(state(sqlite, again.approvalId), 'revoked');
+  assert.equal(appStatus(sqlite, 'a'), 'applied');
+  // Never from another attempt.
+  addApp(sqlite, 'b', ghUrl(2));
+  const b = await approveOne(db, 'b');
+  await claimed(db, b);
+  await resolveSubmission(db, OWNER, b.approvalId, 'not_sent', NOW + 36 * MIN);
+  await recordResults(db, OWNER, [resultOf(b, crypto.randomUUID(), 'submitted')], NOW + 38 * MIN);
+  assert.equal(state(sqlite, b.approvalId), 'not_sent');
+});
+
+test('a check row whose page confirms later becomes submitted, clicked by ApplyPilot', async () => {
+  const { sqlite, db } = setup();
+  addApp(sqlite, 'a', ghUrl(1));
+  const item = await approveOne(db, 'a');
+  const attempt = await claimed(db, item);
+  await recordResults(db, OWNER, [resultOf(item, attempt, 'check')], NOW + MIN);
+  assert.equal(state(sqlite, item.approvalId), 'check');
+  const out = await recordResults(db, OWNER, [resultOf(item, attempt, 'submitted', { confirmationText: 'Thanks for applying' })], NOW + 5 * MIN);
+  assert.equal(out.submissions[0].state, 'submitted');
+  assert.equal(out.submissions[0].clickedBy, 'applypilot');
+  assert.equal(appStatus(sqlite, 'a'), 'applied');
+});
+
+test('the same claim sent twice (Chrome tried another dashboard tab) gets the same answer; a released attempt never claims again', async () => {
+  const { sqlite, db } = setup();
+  addApp(sqlite, 'a', ghUrl(1));
+  const item = await approveOne(db, 'a');
+  const req = claimOf(item);
+  assert.deepEqual(await claimSubmission(db, OWNER, req, NOW), { ok: true, mode: 'supervised' });
+  assert.deepEqual(await claimSubmission(db, OWNER, req, NOW + 1000), { ok: true, mode: 'supervised' });
+  assert.deepEqual(events(sqlite, item.approvalId), ['approved', 'claimed']);
+  // Chrome gave that attempt back; a copy of its claim that arrives late is refused.
+  await recordResults(db, OWNER, [resultOf(item, req.attemptId, 'not_clicked')], NOW + MIN);
+  assert.equal(state(sqlite, item.approvalId), 'approved');
+  const late: ClaimResult = await claimSubmission(db, OWNER, req, NOW + 2 * MIN);
+  assert.deepEqual(late, { ok: false, reason: 'attempt_closed' });
+  assert.equal(state(sqlite, item.approvalId), 'approved');
+  assert.equal((await claimSubmission(db, OWNER, claimOf(item), NOW + 3 * MIN)).ok, true, 'a new attempt may claim it');
+});
+
+test('"Stop everything" during a claim: when Chrome gives the claim back, it comes back cancelled', async () => {
+  const { sqlite, db } = setup();
+  addApp(sqlite, 'a', ghUrl(1));
+  const item = await approveOne(db, 'a');
+  const attempt = await claimed(db, item);
+  assert.deepEqual(await cancelSubmissions(db, OWNER, 'all', NOW + 1000), { revoked: [], tooLate: [item.approvalId] });
+  await recordResults(db, OWNER, [resultOf(item, attempt, 'not_clicked')], NOW + 2000);
+  assert.equal(state(sqlite, item.approvalId), 'revoked');
+  assert.equal((sqlite.prepare('SELECT reason FROM submissions WHERE id = ?').get(item.approvalId) as { reason: string }).reason, 'Cancelled by you');
+  assert.deepEqual(events(sqlite, item.approvalId), ['approved', 'claimed', 'cancel_requested', 'result:not_clicked', 'revoked']);
+  assert.equal((await claimSubmission(db, OWNER, claimOf(item), NOW + MIN)).ok, false);
+  // A claim that wasn't cancelled is still released back to approved.
+  addApp(sqlite, 'b', ghUrl(2));
+  const b = await approveOne(db, 'b');
+  const attemptB = await claimed(db, b, NOW + MIN);
+  await recordResults(db, OWNER, [resultOf(b, attemptB, 'not_clicked')], NOW + 2 * MIN);
+  assert.equal(state(sqlite, b.approvalId), 'approved');
+});
+
+test('calibration counts only supervised claims confirmed straight from your click on the form ApplyPilot checked', async () => {
+  const { sqlite, db } = setup();
+  for (const id of ['ok', 'unknown', 'changed', 'resolved', 'by-hand']) addApp(sqlite, id, LEVER(id.length + id.charCodeAt(0)));
+  const mine = (item: ApprovedItem, attemptId: string | null, extra: Record<string, unknown> = {}) =>
+    resultOf(item, attemptId, 'submitted', { clicked: false, clickedBy: 'you', ...extra });
+  const ok = await approveOne(db, 'ok');
+  await recordResults(db, OWNER, [mine(ok, await claimed(db, ok), { fingerprintMatched: true })], NOW + MIN);
+  assert.deepEqual(await calibration(db), { greenhouse: 0, lever: 1, ashby: 0 });
+  // Confirmed while ApplyPilot watched, without a click it could compare: still counts.
+  const unknown = await approveOne(db, 'unknown');
+  await recordResults(db, OWNER, [mine(unknown, await claimed(db, unknown))], NOW + MIN);
+  assert.equal((await calibration(db)).lever, 2);
+  // The form changed before your click.
+  const changed = await approveOne(db, 'changed');
+  await recordResults(db, OWNER, [mine(changed, await claimed(db, changed), { fingerprintMatched: false })], NOW + MIN);
+  // You said "It went through" on a check row.
+  const resolved = await approveOne(db, 'resolved');
+  const attemptR = await claimed(db, resolved);
+  await recordResults(db, OWNER, [resultOf(resolved, attemptR, 'check', { clickedBy: 'you', clicked: false })], NOW + MIN);
+  await resolveSubmission(db, OWNER, resolved.approvalId, 'submitted', NOW + 2 * MIN);
+  // A needs-you tab you finished by hand.
+  const byHand = await approveOne(db, 'by-hand');
+  const attemptH = await claimed(db, byHand);
+  await recordResults(db, OWNER, [resultOf(byHand, attemptH, 'needs_you')], NOW + MIN);
+  await recordResults(db, OWNER, [mine(byHand, attemptH)], NOW + 2 * MIN);
+  for (const item of [changed, resolved, byHand]) assert.equal(state(sqlite, item.approvalId), 'submitted');
+  assert.deepEqual(await calibration(db), { greenhouse: 0, lever: 2, ashby: 0 });
+});
+
+test('results for an approval this account does not own are left in Chrome, not acked', async () => {
+  const { sqlite, db } = setup();
+  addApp(sqlite, 'a', ghUrl(1));
+  const item = await approveOne(db, 'a');
+  const attempt = await claimed(db, item);
+  const result = resultOf(item, attempt, 'submitted');
+  const wrong = await recordResults(db, OTHER, [result], NOW + MIN);
+  assert.deepEqual(wrong.acked, []);
+  assert.deepEqual(wrong.notYours, [result.resultId]);
+  assert.equal(state(sqlite, item.approvalId), 'claimed');
+  const right = await recordResults(db, OWNER, [result], NOW + 2 * MIN);
+  assert.deepEqual(right.acked, [result.resultId]);
+  assert.equal(state(sqlite, item.approvalId), 'submitted');
 });
 
 test('cancel revokes approvals not yet claimed and reports claimed ones as too late', async () => {

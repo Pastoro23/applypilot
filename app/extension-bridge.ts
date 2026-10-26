@@ -58,6 +58,7 @@ export function useExtensionBridge(opts: {
   const pending = useRef(new Map<string, (payload: unknown) => void>());
   const syncing = useRef({ running: false, again: false });
   const refreshTimer = useRef<number | undefined>(undefined);
+  const readyCount = useRef(0);
 
   const post = useCallback((type: string, payload: unknown, replyTo?: string) => {
     const id = crypto.randomUUID();
@@ -130,6 +131,7 @@ export function useExtensionBridge(opts: {
       markMissing();
       return;
     }
+    readyCount.current += 1;
     const wasConnected = statusRef.current === "connected";
     statusRef.current = "connected";
     setReady({
@@ -142,10 +144,14 @@ export function useExtensionBridge(opts: {
     if (!wasConnected) void syncResults();
   }, [markMissing, syncResults]);
 
-  const hello = useCallback(
-    () => request<unknown>("AP_HELLO", {}, HELLO_TIMEOUT_MS).then(applyReady, markMissing),
-    [applyReady, markMissing, request],
-  );
+  const hello = useCallback(() => {
+    // A hello sent before Chrome injected bridge.js is never answered; the AP_READY bridge.js sends on load
+    // already said the extension is here, so that hello timing out doesn't make it missing.
+    const seen = readyCount.current;
+    return request<unknown>("AP_HELLO", {}, HELLO_TIMEOUT_MS).then(applyReady, () => {
+      if (readyCount.current === seen) markMissing();
+    });
+  }, [applyReady, markMissing, request]);
 
   const refreshSoon = useCallback(() => {
     window.clearTimeout(refreshTimer.current);
@@ -181,8 +187,11 @@ export function useExtensionBridge(opts: {
         }
         return;
       }
-      if (data.type === "AP_READY") applyReady(data.payload);
-      else if (data.type === "AP_CLAIM" && typeof data.id === "string") void answerClaim(data.id, data.payload);
+      if (data.type === "AP_READY") {
+        applyReady(data.payload);
+        // bridge.js's own hello doesn't let this tab take claims; this page's hello does.
+        if (statusRef.current === "connected") void hello();
+      } else if (data.type === "AP_CLAIM" && typeof data.id === "string") void answerClaim(data.id, data.payload);
       else if (data.type === "AP_RESULTS_WAITING") void syncResults();
       else if (data.type === "AP_PROGRESS" && isObject(data.payload)) {
         const p = data.payload;

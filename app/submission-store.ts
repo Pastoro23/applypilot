@@ -10,6 +10,9 @@ export const MAX_APPROVE = 20;
 export const MAX_RESULTS = 20;
 export const APPROVAL_MS = 24 * 3_600_000;
 export const STALE_CLAIM_MS = 15 * 60_000;
+// A supervised claim waits up to 30 minutes for your click, plus the outcome check, so it goes stale later.
+export const STALE_SUPERVISED_CLAIM_MS = 35 * 60_000;
+export const staleAfterMs = (claimMode: string) => (claimMode === "supervised" ? STALE_SUPERVISED_CLAIM_MS : STALE_CLAIM_MS);
 export const CALIBRATION_NEEDED = 3;
 export const DAILY_CAP_MAX = 25;
 const AUTO_SPACING_MS = 60_000;
@@ -55,6 +58,7 @@ export type SubmissionResult = {
   resultId: string; approvalId: string; attemptId: string | null; applicationId: string; jobKey: string;
   outcome: ResultOutcome; clicked: boolean; clickedBy: "" | "applypilot" | "you"; reasons: Reason[]; pageUrl: string;
   confirmationText: string; startedAt: string; finishedAt: string; extensionVersion: string; confirmationKind: string;
+  fingerprintMatched: boolean | null;
 };
 
 export const defaultSettings: SubmitSettings = {
@@ -222,8 +226,11 @@ function revoke(db: SqlDatabase, owner: string, id: string, reason: string, acto
 }
 
 // Supervised submissions Peter clicked himself and ApplyPilot saw confirmed; 3 on an ATS unlock automatic clicks there.
-const CALIBRATION = `cal AS (SELECT sum(ats = 'greenhouse') AS cal_greenhouse, sum(ats = 'lever') AS cal_lever, sum(ats = 'ashby') AS cal_ashby
-  FROM submissions WHERE owner_email = ? AND state = 'submitted' AND claim_mode = 'supervised' AND clicked_by = 'you')`;
+// Only a claim that went straight to submitted on such a result counts ('calibrated'), never one resolved by hand,
+// finished in a needs-you tab, or clicked on a form that no longer matched ApplyPilot's check.
+const CALIBRATION = `cal AS (SELECT sum(s.ats = 'greenhouse') AS cal_greenhouse, sum(s.ats = 'lever') AS cal_lever, sum(s.ats = 'ashby') AS cal_ashby
+  FROM submissions s WHERE s.owner_email = ? AND s.state = 'submitted' AND s.claim_mode = 'supervised' AND s.clicked_by = 'you'
+    AND EXISTS (SELECT 1 FROM submission_events e WHERE e.owner_email = s.owner_email AND e.submission_id = s.id AND e.event = 'calibrated'))`;
 const calibrationOf = (r: DbRow | undefined | null): Calibration => ({
   greenhouse: Number(r?.cal_greenhouse ?? 0), lever: Number(r?.cal_lever ?? 0), ashby: Number(r?.cal_ashby ?? 0),
 });
@@ -260,7 +267,7 @@ function checkItems(items: unknown) {
 
 export async function approveForSubmit(
   db: SqlDatabase, owner: string, items: unknown, opts: { includeCoverLetter: unknown; now?: number },
-): Promise<{ approved: ApprovedItem[]; skipped: SkippedItem[] }> {
+): Promise<{ approved: ApprovedItem[]; skipped: SkippedItem[]; replaced: string[] }> {
   const list = checkItems(items);
   if (typeof opts.includeCoverLetter !== "boolean") throw invalid();
   const includeCoverLetter = opts.includeCoverLetter;
@@ -292,6 +299,7 @@ export async function approveForSubmit(
   const skipped: SkippedItem[] = [];
   const statements: SqlStatement[] = [...sweep(db, owner, nowIso)];
   const inserts: { index: number; item: ApprovedItem }[] = [];
+  const revokes: { index: number; id: string }[] = [];
   const handled = new Set<string>();
   const skip = (applicationId: string, code: string, reason: string) => skipped.push({ applicationId, code, reason });
 
@@ -322,7 +330,9 @@ export async function approveForSubmit(
       Number(r.tailored_revision) === item.revision && r.profile_hash === hash &&
       (Number(r.include_cover_letter) === 1) === includeCoverLetter && String(r.expires_at) > nowIso);
     for (const stale of live) {
-      if (stale !== fresh) statements.push(...revoke(db, owner, String(stale.id), "Replaced by a new approval", "peter", nowIso));
+      if (stale === fresh) continue;
+      statements.push(...revoke(db, owner, String(stale.id), "Replaced by a new approval", "peter", nowIso));
+      revokes.push({ index: statements.length - 1, id: String(stale.id) });
     }
     if (fresh) {
       approved.push({ ...approvedItemFromRow(toRow(fresh)), applyUrls: target.applyUrls });
@@ -361,7 +371,9 @@ export async function approveForSubmit(
       skip(item.applicationId, "in_progress", "ApplyPilot is sending this or needs you to check it");
     }
   }
-  return { approved: approved.filter((item) => !lost.has(item.approvalId)), skipped };
+  // The dashboard cancels these in Chrome too, or Chrome would refuse the new approval as a duplicate.
+  const replaced = revokes.filter(({ index }) => results[index]?.meta.changes === 1).map(({ id }) => id);
+  return { approved: approved.filter((item) => !lost.has(item.approvalId)), skipped, replaced };
 }
 
 function checkClaim(value: unknown): ClaimRequest | null {
@@ -386,6 +398,7 @@ function checkClaim(value: unknown): ClaimRequest | null {
 type ClaimFacts = DbRow & {
   sub_id: string | null; sub_application_id: string | null; sub_job_key: string | null; sub_ats: string | null;
   sub_state: string | null; sub_expires_at: string | null; sub_profile_hash: string | null; sub_revision: unknown;
+  sub_attempt_id: string | null; sub_claim_mode: string | null; attempt_closed: unknown;
   app_id: string | null; app_revision: unknown; app_status: string | null; submitted_exists: unknown;
   auto_count: unknown; auto_oldest: string | null; auto_last: string | null;
 };
@@ -395,6 +408,8 @@ async function claimFacts(db: SqlDatabase, owner: string, req: ClaimRequest, now
   return db.prepare(`WITH ${CALIBRATION}
     SELECT p.*, cal.*, s.id AS sub_id, s.application_id AS sub_application_id, s.job_key AS sub_job_key, s.ats AS sub_ats,
       s.state AS sub_state, s.expires_at AS sub_expires_at, s.profile_hash AS sub_profile_hash, s.tailored_revision AS sub_revision,
+      s.attempt_id AS sub_attempt_id, s.claim_mode AS sub_claim_mode,
+      EXISTS (${resultForAttempt("o.owner", "s.id")}) AS attempt_closed,
       a.id AS app_id, a.tailored_revision AS app_revision, a.status AS app_status,
       EXISTS (SELECT 1 FROM submissions x WHERE x.owner_email = o.owner AND x.job_key = ? AND x.state = 'submitted') AS submitted_exists,
       (SELECT count(*) FROM submissions c WHERE c.owner_email = o.owner AND c.claim_mode = 'auto' AND c.claimed_at > ?) AS auto_count,
@@ -404,10 +419,15 @@ async function claimFacts(db: SqlDatabase, owner: string, req: ClaimRequest, now
     LEFT JOIN profiles p ON p.owner_email = o.owner
     LEFT JOIN submissions s ON s.id = ? AND s.owner_email = o.owner
     LEFT JOIN applications a ON a.id = s.application_id AND a.owner_email = o.owner`)
-    .bind(owner, req.jobKey, dayAgo, dayAgo, owner, req.approvalId).first<ClaimFacts>();
+    .bind(owner, req.attemptId, req.jobKey, dayAgo, dayAgo, owner, req.approvalId).first<ClaimFacts>();
 }
 
 type Denial = { ok: false; reason: string; retryAfterSec?: number; resetAt?: string };
+
+// An attempt Chrome already reported a result for (usually the not_clicked that gave it back) is closed: a copy of its
+// claim that arrives late is refused.
+const resultForAttempt = (ownerSql: string, idSql: string) => `SELECT 1 FROM submission_events r WHERE r.owner_email = ${ownerSql}
+  AND r.submission_id = ${idSql} AND r.event LIKE 'result:%' AND json_extract(r.detail_json, '$.attemptId') = ?`;
 
 // The same conditions as the claim UPDATE, read back so the runner learns why it may not go on.
 function denialFrom(f: ClaimFacts | null, req: ClaimRequest, settings: SubmitSettings, mode: string, currentHash: string, now: number): Denial | null {
@@ -417,6 +437,7 @@ function denialFrom(f: ClaimFacts | null, req: ClaimRequest, settings: SubmitSet
   if (f.sub_state === "expired" || (f.sub_state === "approved" && String(f.sub_expires_at) <= nowIso)) return { ok: false, reason: "expired" };
   if (f.sub_state === "submitted" || Number(f.submitted_exists)) return { ok: false, reason: "already_submitted" };
   if (f.sub_state !== "approved") return { ok: false, reason: "already_claimed" };
+  if (Number(f.attempt_closed)) return { ok: false, reason: "attempt_closed" };
   if (f.sub_profile_hash !== currentHash) return { ok: false, reason: "profile_changed" };
   if (!f.app_id) return { ok: false, reason: "not_found" };
   if (f.app_status !== "saved" && f.app_status !== "ready") return { ok: false, reason: "status_final" };
@@ -446,6 +467,11 @@ export async function claimSubmission(db: SqlDatabase, owner: string, input: unk
   if (!req) return { ok: false, reason: "invalid_request" };
   const nowIso = iso(now);
   const facts = await claimFacts(db, owner, req, now);
+  // The same attempt again (Chrome tried another dashboard tab after no answer) gets the answer it was given.
+  if (facts?.sub_state === "claimed" && facts.sub_attempt_id === req.attemptId && facts.sub_application_id === req.applicationId &&
+    facts.sub_job_key === req.jobKey && (facts.sub_claim_mode === "auto" || facts.sub_claim_mode === "supervised")) {
+    return { ok: true, mode: facts.sub_claim_mode };
+  }
   const settings = parseSettings(facts?.apply_settings_json);
   const currentHash = profileReady(facts) ? await hashOfRow(facts) : "";
   const ats = facts && isAts(facts.sub_ats) ? facts.sub_ats : null;
@@ -472,13 +498,14 @@ export async function claimSubmission(db: SqlDatabase, owner: string, input: unk
         AND application_id = ? AND job_key = ? AND profile_hash = ?
         AND tailored_revision = (SELECT tailored_revision FROM applications WHERE id = ? AND owner_email = ? AND status IN ${OPEN_APP})
         AND NOT EXISTS (SELECT 1 FROM submissions x WHERE x.owner_email = ? AND x.job_key = ? AND x.state = 'submitted')
+        AND NOT EXISTS (${resultForAttempt("?", "?")})
         AND (? = 'supervised' OR (
           (SELECT count(*) FROM submissions c WHERE c.owner_email = ? AND c.claim_mode = 'auto' AND c.claimed_at > ?) < ?
           AND NOT EXISTS (SELECT 1 FROM submissions c WHERE c.owner_email = ? AND c.claim_mode = 'auto' AND c.claimed_at > ?)))`)
       .bind(req.attemptId, mode, nowIso, req.relaxations.join(","), req.resumeSha256, req.resumeFilename,
         JSON.stringify(req.fillReport), req.pageUrl, req.extensionVersion, nowIso,
         req.approvalId, owner, nowIso, req.applicationId, req.jobKey, currentHash,
-        req.applicationId, owner, owner, req.jobKey,
+        req.applicationId, owner, owner, req.jobKey, owner, req.approvalId, req.attemptId,
         mode, owner, iso(now - DAY_MS), settings.dailyCap, owner, iso(now - AUTO_SPACING_MS)),
     db.prepare(`INSERT INTO submission_events (id, owner_email, submission_id, at, actor, event, detail_json)
       SELECT ?, ?, ?, ?, 'extension', 'claimed', ?
@@ -517,6 +544,7 @@ function checkResult(value: unknown, now: number): SubmissionResult | null {
     confirmationText: text(value.confirmationText, 300),
     startedAt: dateOr(value.startedAt, "", now), finishedAt: dateOr(value.finishedAt, iso(now), now),
     extensionVersion: text(value.extensionVersion, 20), confirmationKind: text(value.confirmationKind, 30),
+    fingerprintMatched: typeof value.fingerprintMatched === "boolean" ? value.fingerprintMatched : null,
   };
   if (!UUID.test(result.resultId) || !UUID.test(result.approvalId) || (attemptId !== null && !UUID.test(attemptId))) return null;
   if (!result.applicationId || !result.jobKey) return null;
@@ -530,6 +558,8 @@ function dateOr(value: unknown, fallback: string, now: number) {
   return Number.isFinite(time) && time <= now + 5 * 60_000 ? iso(time) : fallback;
 }
 
+const cancelEventId = (approvalId: string, attemptId: string) => `${approvalId}:cancel:${attemptId}`;
+
 // The guarded UPDATEs for one result; each matches only from the states the transition table allows.
 function transition(db: SqlDatabase, owner: string, r: SubmissionResult, nowIso: string): SqlStatement[] {
   const target = "id = ? AND owner_email = ? AND application_id = ? AND job_key = ?";
@@ -537,9 +567,19 @@ function transition(db: SqlDatabase, owner: string, r: SubmissionResult, nowIso:
   const reasons = JSON.stringify(r.reasons);
   const firstReason = r.reasons.find((reason) => reason.text)?.text ?? "";
   if (r.outcome === "submitted") {
-    // From a claim with this attempt, or Peter's own confirmed submission in a watched tab.
-    const from = `((state = 'claimed' AND attempt_id = ?) OR (? = 'you' AND state IN ('needs_you','revoked','expired','check','not_sent')))`;
+    // From this attempt's claim, its 'check', or a 'not_sent' you chose before the late result arrived; or your own
+    // confirmed submission in a watched tab, whatever happened to the claim.
+    const from = `((state IN ('claimed','check','not_sent') AND attempt_id = ?) OR
+      (? = 'you' AND state IN ('claimed','needs_you','revoked','expired','check','not_sent')))`;
+    // Calibration: your click on the form ApplyPilot checked, confirmed straight from the supervised claim.
+    const calibrated = r.clickedBy === "you" && r.fingerprintMatched !== false && r.attemptId
+      ? [db.prepare(`INSERT OR IGNORE INTO submission_events (id, owner_email, submission_id, at, actor, event, detail_json)
+          SELECT ?, owner_email, id, ?, 'server', 'calibrated', ? FROM submissions
+          WHERE ${target} AND state = 'claimed' AND attempt_id = ? AND claim_mode = 'supervised'`)
+        .bind(`${r.resultId}:calibrated`, nowIso, JSON.stringify({ attemptId: r.attemptId }), ...keys, r.attemptId)]
+      : [];
     return [
+      ...calibrated,
       db.prepare(`INSERT OR IGNORE INTO submission_events (id, owner_email, submission_id, at, actor, event, detail_json)
         SELECT id || ':revoked', owner_email, id, ?, 'server', 'revoked', '{"reason":"Already submitted"}' FROM submissions
         WHERE owner_email = ? AND job_key = ? AND id != ? AND state = 'approved'
@@ -574,14 +614,21 @@ function transition(db: SqlDatabase, owner: string, r: SubmissionResult, nowIso:
         r.extensionVersion, nowIso, ...keys, r.attemptId)];
   }
   if (r.outcome === "not_clicked") {
+    // "Stop everything" while this claim was out: the claim comes back cancelled, never approved again.
+    const cancelAsked = `EXISTS (SELECT 1 FROM submission_events c WHERE c.owner_email = ? AND c.id = ?)`;
+    const cancelId = cancelEventId(r.approvalId, r.attemptId ?? "");
     return [
-      db.prepare(`UPDATE submissions SET state = CASE WHEN expires_at > ? THEN 'approved' ELSE 'expired' END,
-          reason = CASE WHEN expires_at > ? THEN '' ELSE 'Approval expired' END, updated_at = ?
+      db.prepare(`UPDATE submissions SET state = CASE WHEN ${cancelAsked} THEN 'revoked' WHEN expires_at > ? THEN 'approved' ELSE 'expired' END,
+          reason = CASE WHEN ${cancelAsked} THEN 'Cancelled by you' WHEN expires_at > ? THEN '' ELSE 'Approval expired' END, updated_at = ?
         WHERE ${target} AND state = 'claimed' AND attempt_id = ?`)
-        .bind(nowIso, nowIso, nowIso, ...keys, r.attemptId),
+        .bind(owner, cancelId, nowIso, owner, cancelId, nowIso, nowIso, ...keys, r.attemptId),
       db.prepare(`INSERT OR IGNORE INTO submission_events (id, owner_email, submission_id, at, actor, event, detail_json)
         SELECT id || ':expired', owner_email, id, ?, 'server', 'expired', '{}' FROM submissions WHERE ${target} AND state = 'expired'`)
         .bind(nowIso, ...keys),
+      db.prepare(`INSERT OR IGNORE INTO submission_events (id, owner_email, submission_id, at, actor, event, detail_json)
+        SELECT id || ':revoked', owner_email, id, ?, 'peter', 'revoked', '{"reason":"Cancelled by you"}' FROM submissions
+        WHERE ${target} AND state = 'revoked' AND ${cancelAsked}`)
+        .bind(nowIso, ...keys, owner, cancelId),
     ];
   }
   return []; // cancelled: recorded as an event only
@@ -597,48 +644,65 @@ export async function recordResults(db: SqlDatabase, owner: string, input: unkno
     if (result && !valid.some((other) => other.resultId === result.resultId)) valid.push(result);
     else if (!result) rejected.push({ resultId: isObject(raw) ? text(raw.resultId, 40) : "", reason: "invalid_result" });
   }
-  if (!valid.length) return { acked: [] as string[], rejected, submissions: [] as SubmissionRow[] };
-  const ids = valid.map((r) => r.resultId);
-  const seen = new Set((await db.prepare(`SELECT id FROM submission_events WHERE id IN (${marks(ids.length)})`)
-    .bind(...ids).all<{ id: string }>()).results.map((row) => row.id));
+  if (!valid.length) return { acked: [] as string[], rejected, notYours: [] as string[], submissions: [] as SubmissionRow[] };
+  // A result for an approval this account doesn't own is left in Chrome for the account that does.
+  const asked = [...new Set(valid.map((r) => r.approvalId))];
+  const owned = new Set((await db.prepare(`SELECT id FROM submissions WHERE owner_email = ? AND id IN (${marks(asked.length)})`)
+    .bind(owner, ...asked).all<{ id: string }>()).results.map((row) => row.id));
+  const mine = valid.filter((r) => owned.has(r.approvalId));
+  const notYours = valid.filter((r) => !owned.has(r.approvalId)).map((r) => r.resultId);
+  if (!mine.length) return { acked: [] as string[], rejected, notYours, submissions: [] as SubmissionRow[] };
+  const ids = mine.map((r) => r.resultId);
+  const seen = new Set((await db.prepare(`SELECT id FROM submission_events WHERE owner_email = ? AND id IN (${marks(ids.length)})`)
+    .bind(owner, ...ids).all<{ id: string }>()).results.map((row) => row.id));
   // A result already recorded is acked again but applied once. The event and its transition commit together.
   const statements: SqlStatement[] = [];
-  for (const r of valid) {
+  for (const r of mine) {
     if (seen.has(r.resultId)) continue;
     statements.push(db.prepare(`INSERT OR IGNORE INTO submission_events (id, owner_email, submission_id, at, actor, event, detail_json)
       SELECT ?, ?, ?, ?, 'extension', ?, ? WHERE EXISTS (SELECT 1 FROM submissions WHERE id = ? AND owner_email = ?)`)
       .bind(r.resultId, owner, r.approvalId, nowIso, `result:${r.outcome}`,
         detailJson({ attemptId: r.attemptId, applicationId: r.applicationId, jobKey: r.jobKey, clicked: r.clicked, clickedBy: r.clickedBy,
           reasons: r.reasons, pageUrl: r.pageUrl, confirmationText: r.confirmationText, confirmationKind: r.confirmationKind,
-          startedAt: r.startedAt, finishedAt: r.finishedAt, extensionVersion: r.extensionVersion }),
+          startedAt: r.startedAt, finishedAt: r.finishedAt, extensionVersion: r.extensionVersion, fingerprintMatched: r.fingerprintMatched }),
         r.approvalId, owner));
     statements.push(...transition(db, owner, r, nowIso));
   }
   if (statements.length) await db.batch(statements);
-  const approvalIds = [...new Set(valid.map((r) => r.approvalId))];
+  const approvalIds = [...new Set(mine.map((r) => r.approvalId))];
   const rows = (await db.prepare(`SELECT ${ROW_COLUMNS} FROM submissions WHERE owner_email = ? AND id IN (${marks(approvalIds.length)})`)
     .bind(owner, ...approvalIds).all<DbRow>()).results.map(toRow);
-  return { acked: ids, rejected, submissions: rows };
+  return { acked: ids, rejected, notYours, submissions: rows };
 }
 
 export async function cancelSubmissions(db: SqlDatabase, owner: string, ids: readonly unknown[] | "all", now = Date.now()) {
   const nowIso = iso(now);
-  let found: { id: string; state: string }[];
+  type Found = { id: string; state: string; attempt_id: string | null };
+  let found: Found[];
   if (ids === "all") {
-    found = (await db.prepare("SELECT id, state FROM submissions WHERE owner_email = ? AND state IN ('approved','claimed')")
-      .bind(owner).all<{ id: string; state: string }>()).results;
+    found = (await db.prepare("SELECT id, state, attempt_id FROM submissions WHERE owner_email = ? AND state IN ('approved','claimed')")
+      .bind(owner).all<Found>()).results;
   } else {
     // D1 allows 100 bound values per statement.
     const list = [...new Set(ids.filter((id): id is string => typeof id === "string" && UUID.test(id)))].slice(0, 50);
     if (!list.length) return { revoked: [] as string[], tooLate: [] as string[] };
-    found = (await db.prepare(`SELECT id, state FROM submissions WHERE owner_email = ? AND state IN ('approved','claimed')
-      AND id IN (${marks(list.length)})`).bind(owner, ...list).all<{ id: string; state: string }>()).results;
+    found = (await db.prepare(`SELECT id, state, attempt_id FROM submissions WHERE owner_email = ? AND state IN ('approved','claimed')
+      AND id IN (${marks(list.length)})`).bind(owner, ...list).all<Found>()).results;
   }
-  const tooLate = found.filter((row) => row.state === "claimed").map((row) => row.id);
+  const claimed = found.filter((row) => row.state === "claimed");
+  const tooLate = claimed.map((row) => row.id);
   const pending = found.filter((row) => row.state === "approved").map((row) => row.id);
-  if (!pending.length) return { revoked: [] as string[], tooLate };
-  const results = await db.batch(pending.flatMap((id) => revoke(db, owner, id, "Cancelled by you", "peter", nowIso)));
-  const revoked = pending.filter((_, index) => results[index * 2 + 1]?.meta.changes === 1);
+  // A claim can't be taken back under the runner, but if the runner gives it back, it comes back cancelled.
+  const cancelAsks = claimed.filter((row) => row.attempt_id).map((row) =>
+    db.prepare(`INSERT OR IGNORE INTO submission_events (id, owner_email, submission_id, at, actor, event, detail_json)
+      SELECT ?, owner_email, id, ?, 'peter', 'cancel_requested', ? FROM submissions WHERE id = ? AND owner_email = ? AND state = 'claimed' AND attempt_id = ?`)
+      .bind(cancelEventId(row.id, String(row.attempt_id)), nowIso, JSON.stringify({ attemptId: row.attempt_id }), row.id, owner, row.attempt_id));
+  if (!pending.length) {
+    if (cancelAsks.length) await db.batch(cancelAsks);
+    return { revoked: [] as string[], tooLate };
+  }
+  const results = await db.batch([...cancelAsks, ...pending.flatMap((id) => revoke(db, owner, id, "Cancelled by you", "peter", nowIso))]);
+  const revoked = pending.filter((_, index) => results[cancelAsks.length + index * 2 + 1]?.meta.changes === 1);
   // A row that moved on between the read and the write was claimed (or expired) in the meantime.
   tooLate.push(...pending.filter((id) => !revoked.includes(id)));
   return { revoked, tooLate };
@@ -649,9 +713,10 @@ export async function resolveSubmission(db: SqlDatabase, owner: string, id: unkn
   const nowIso = iso(now);
   const results = await db.batch([
     db.prepare(`UPDATE submissions SET state = ?, reason = ?, finished_at = COALESCE(finished_at, ?), updated_at = ?
-      WHERE id = ? AND owner_email = ? AND (state = 'check' OR (state = 'claimed' AND claimed_at < ?))`)
+      WHERE id = ? AND owner_email = ? AND (state = 'check' OR
+        (state = 'claimed' AND claimed_at < CASE WHEN claim_mode = 'supervised' THEN ? ELSE ? END))`)
       .bind(outcome, outcome === "submitted" ? "You said it went through" : "You said it didn't go through", nowIso, nowIso,
-        id, owner, iso(now - STALE_CLAIM_MS)),
+        id, owner, iso(now - STALE_SUPERVISED_CLAIM_MS), iso(now - STALE_CLAIM_MS)),
     db.prepare(`INSERT INTO submission_events (id, owner_email, submission_id, at, actor, event, detail_json)
       SELECT ?, ?, ?, ?, 'peter', ?, '{}' WHERE EXISTS (SELECT 1 FROM submissions WHERE id = ? AND owner_email = ? AND state = ? AND updated_at = ?)`)
       .bind(crypto.randomUUID(), owner, id, nowIso, `resolved:${outcome}`, id, owner, outcome, nowIso),

@@ -26,6 +26,12 @@ async function dashFrames() {
   return (Array.isArray(apDash) ? apDash : []).slice().sort((a, b) => b.at - a.at);
 }
 
+// Frames whose page hook said hello, top-level dashboard tabs first. A tab where only bridge.js loaded (an
+// /api view, a page still hydrating, a frame inside another site) can't answer a claim.
+async function readyFrames() {
+  return (await dashFrames()).filter((f) => f.ready === true).sort((a, b) => Number(b.top === true) - Number(a.top === true));
+}
+
 async function dropFrame(frame) {
   const { apDash } = await session.get("apDash");
   const rest = (Array.isArray(apDash) ? apDash : []).filter((f) => !(f.tabId === frame.tabId && f.frameId === frame.frameId));
@@ -35,14 +41,18 @@ async function dropFrame(frame) {
 async function waitForFrames(ms) {
   const until = Date.now() + ms;
   for (;;) {
-    const frames = await dashFrames();
+    const frames = await readyFrames();
     if (frames.length || Date.now() >= until) return frames;
     await new Promise((r) => setTimeout(r, 500));
   }
 }
 
+const NOT_DELIVERED = /receiving end does not exist|could not establish connection/i;
+
+// The same attempt goes to the next ready frame when one times out or goes away: the server grants an attempt
+// once and answers a repeat of it the same way, so trying again can't make a second claim.
 async function claim(payload) {
-  let frames = await dashFrames();
+  let frames = await readyFrames();
   if (!frames.length && !openedDashboard) {
     openedDashboard = true;
     try {
@@ -50,18 +60,25 @@ async function claim(payload) {
     } catch {}
     frames = await waitForFrames(DASH_WAIT_MS);
   }
+  let last = { ok: false, reason: "no_dashboard" };
   for (const frame of frames) {
     let reply;
     try {
       reply = await chrome.tabs.sendMessage(frame.tabId, { type: "AP_CLAIM", payload }, { frameId: frame.frameId });
-    } catch {
-      // Not delivered: that frame is gone, so the claim never left this browser. Try the next one.
+    } catch (e) {
       await dropFrame(frame);
+      // A frame that took the request and then unloaded may have sent it on; that claim must be given back.
+      if (!NOT_DELIVERED.test(String((e && e.message) || e))) last = { ok: false, reason: "network" };
       continue;
     }
-    return reply && typeof reply === "object" ? reply : { ok: false, reason: "network" };
+    const r = reply && typeof reply === "object" ? reply : { ok: false, reason: "network" };
+    if (r.ok !== true && (r.reason === "timeout" || r.reason === "network")) {
+      last = r;
+      continue;
+    }
+    return r;
   }
-  return { ok: false, reason: "no_dashboard" };
+  return last;
 }
 
 async function notify(type, payload) {
@@ -168,12 +185,12 @@ function render(v) {
 
   clearTimeout(resumeTimer);
   if (run.state === "paused" && run.resumeAt) {
-    resumeTimer = setTimeout(() => runner?.resume(), Math.max(1000, run.resumeAt - Date.now()));
+    resumeTimer = setTimeout(() => runner?.resumeAfterWait(), Math.max(1000, run.resumeAt - Date.now()));
   }
 }
 
 async function renderBridge() {
-  const n = (await dashFrames()).length;
+  const n = (await readyFrames()).length;
   const el = $("#bridge");
   el.textContent = n ? "ApplyPilot connected" : "ApplyPilot not open";
   el.classList.toggle("missing", !n);
@@ -195,6 +212,11 @@ async function main() {
   chrome.tabs.onRemoved.addListener((tabId) => runner.onTabRemoved(tabId));
   local.onChanged.addListener((changes) => {
     if (changes.apHalt) runner.onHaltChanged(changes.apHalt.newValue === true);
+    // "Resume sending" on the dashboard, which also wakes a run paused for another reason than Stop.
+    if (changes.apWake?.newValue) {
+      openedDashboard = false;
+      runner.onResumeAsked();
+    }
     let added = false;
     for (const [key, change] of Object.entries(changes)) {
       if (key.startsWith("apCancel:") && change.newValue) runner.onCancelMarked(key.slice("apCancel:".length));
@@ -205,7 +227,7 @@ async function main() {
   session.onChanged.addListener((changes) => {
     if (!changes.apDash) return;
     renderBridge();
-    if (Array.isArray(changes.apDash.newValue) && changes.apDash.newValue.length) {
+    if (Array.isArray(changes.apDash.newValue) && changes.apDash.newValue.some((f) => f && f.ready === true)) {
       openedDashboard = false;
       runner.onDashboardConnected();
     }

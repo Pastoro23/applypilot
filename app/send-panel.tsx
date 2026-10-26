@@ -6,9 +6,10 @@ import type { ExtensionBridge } from "./extension-bridge";
 import { buildAutofillProfile, profileHash, type ProfileForExport } from "./profile-records";
 import { buildBatch, MAX_BATCH, resumeFilename, resumePdfFor, tailoredOf, type BatchApplication } from "./send-batch";
 import {
-  approvedItemFromRow, CALIBRATION_NEEDED, STALE_CLAIM_MS,
+  approvedItemFromRow, CALIBRATION_NEEDED,
   type ApprovedItem, type Calibration, type SkippedItem, type SubmissionRow, type SubmitSettings,
 } from "./submission-store";
+import { alreadySubmittedReason, checkText, isStaleClaim, pillLabel, resumeNotice, staleText } from "./submit-pill";
 
 // "Ready to send": review the tailored jobs, approve them with one tap, and Chrome submits each with its own resume.
 // Everything an employer wrote (reasons, confirmation text, labels) is rendered as plain React text.
@@ -28,6 +29,7 @@ const ATS_LIST: Ats[] = ["greenhouse", "lever", "ashby"];
 const LIVE = new Set(["approved", "claimed", "check"]);
 const OPEN_STATUS = new Set(["saved", "ready"]);
 const DAILY_LIMITS = [3, 5, 10, 15, 20, 25];
+const RESUME_WAIT_MS = 6000;
 
 const primaryButton = "rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-500 disabled:opacity-50";
 const smallButton = "rounded-lg border border-slate-700 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:bg-slate-800 disabled:opacity-50";
@@ -81,7 +83,7 @@ export function classifyApplications(
     const related = data.submissions.filter((row) => row.applicationId === app.id || (jobKey !== null && row.jobKey === jobKey));
     const submitted = related.find((row) => row.state === "submitted");
     if (submitted) {
-      out.blocked.push({ app, reason: submitted.clickedBy === "you" ? "Already submitted by you" : "Already submitted by ApplyPilot" });
+      out.blocked.push({ app, reason: alreadySubmittedReason(submitted.clickedBy) });
       continue;
     }
     if (related.some((row) => row.state === "claimed")) {
@@ -141,6 +143,17 @@ export function ReadyToSendPanel({
   const [error, setError] = useState("");
   // Taken by Chrome in this visit, so they count as held before the bridge's next status arrives.
   const [sentIds, setSentIds] = useState<string[]>([]);
+  const [resumeAsked, setResumeAsked] = useState(false);
+
+  // "Resume sending" reports what Chrome did, once its status says so or after a few seconds.
+  useEffect(() => {
+    if (!resumeAsked) return;
+    const timer = window.setTimeout(() => {
+      setResumeAsked(false);
+      setNotice(resumeNotice(bridge.running));
+    }, bridge.running ? 0 : RESUME_WAIT_MS);
+    return () => window.clearTimeout(timer);
+  }, [resumeAsked, bridge.running]);
 
   useEffect(() => {
     let active = true;
@@ -207,10 +220,12 @@ export function ReadyToSendPanel({
     setError("");
     setNotice("");
     try {
-      const result = await requestJson<{ approved: ApprovedItem[]; skipped: SkippedItem[] }>("/api/submissions/approve", jsonBody("POST", {
+      const result = await requestJson<{ approved: ApprovedItem[]; skipped: SkippedItem[]; replaced?: string[] }>("/api/submissions/approve", jsonBody("POST", {
         items: selected.map((row) => ({ applicationId: row.app.id, revision: row.app.tailoredRevision })),
         includeCoverLetter,
       }));
+      // An approval this one replaced may still sit in Chrome's queue, which would refuse the new one as a duplicate.
+      if (connected && result.replaced?.length) await bridge.cancel(result.replaced).catch(() => undefined);
       setTicks({});
       await onReload();
       const intro = result.skipped.length ? [`${result.skipped.length} couldn't be approved: ${describe(result.skipped, applications)}.`] : [];
@@ -250,9 +265,10 @@ export function ReadyToSendPanel({
   async function resumeSending() {
     setBusy("resume");
     setError("");
+    setNotice("");
     try {
       await bridge.resume();
-      setNotice("Sending again in Chrome.");
+      setResumeAsked(true);
     } catch (reason) {
       setError(messageOf(reason, "Chrome didn't answer."));
     } finally {
@@ -545,7 +561,6 @@ const PILL_STYLES: Record<string, string> = {
   needs_you: "bg-amber-400/10 text-amber-300",
   check: "bg-amber-400/10 text-amber-300",
 };
-const MOVING = new Set(["opening", "filling", "auditing", "claiming", "submitting", "observing"]);
 
 export function SubmitPill({
   row, note, rejectedReason, bridge, now, onCancel, onResolve,
@@ -574,19 +589,8 @@ export function SubmitPill({
     }
   }
 
-  const staleClaim = row.state === "claimed" && row.claimedAt !== null && now - Date.parse(row.claimedAt) > STALE_CLAIM_MS;
-  let label: string;
-  if (row.state === "approved") {
-    if (rejectedReason) label = "Approved · Chrome didn't take it";
-    else if (note && !note.state.startsWith("done:") && note.state !== "cancelled" && note.note) label = MOVING.has(note.state) ? `${note.note}…` : note.note;
-    else label = "Approved · waiting for Chrome";
-  } else if (row.state === "claimed") label = staleClaim ? "Check this" : "Sending…";
-  else if (row.state === "submitted") label = row.clickedBy === "you" ? "Sent by you" : "Sent by ApplyPilot";
-  else if (row.state === "needs_you") label = "Needs you";
-  else if (row.state === "check") label = "Check this";
-  else if (row.state === "not_sent") label = "Not sent";
-  else if (row.state === "expired") label = "Approval expired";
-  else label = "Not sent · cancelled";
+  const staleClaim = isStaleClaim(row, now);
+  const label = pillLabel(row, now, note, rejectedReason);
 
   const reasons = row.reasons.length ? row.reasons.map((reason) => reason.text || reason.code) : row.reason ? [row.reason] : [];
   const resolveButtons = (
@@ -602,26 +606,24 @@ export function SubmitPill({
         <span className={`rounded-full px-2.5 py-1 text-[11px] font-bold ${PILL_STYLES[row.state] ?? "bg-slate-500/10 text-slate-400"}`}>{label}</span>
         {row.state === "approved" && <button disabled={busy} onClick={() => void act(() => onCancel(row.id))} className={smallButton}>Cancel</button>}
         {row.state === "submitted" && <button onClick={() => setRecord(!record)} className={smallButton}>{record ? "Hide record" : "Submission record"}</button>}
-        {row.state === "needs_you" && (
-          <>
-            {bridge.status === "connected" && <button disabled={busy} onClick={() => void act(() => bridge.focus(row.id))} className={smallButton}>Show tab</button>}
-            {/^https:\/\//i.test(row.applyUrl) && <a href={row.applyUrl} target="_blank" rel="noreferrer" className={`${smallButton} text-blue-300`}>Open application</a>}
-          </>
+        {(row.state === "needs_you" || row.state === "check") && bridge.status === "connected" && (
+          <button disabled={busy} onClick={() => void act(() => bridge.focus(row.id))} className={smallButton}>Show tab</button>
+        )}
+        {row.state === "needs_you" && /^https:\/\//i.test(row.applyUrl) && (
+          <a href={row.applyUrl} target="_blank" rel="noreferrer" className={`${smallButton} text-blue-300`}>Open application</a>
         )}
         {(row.state === "check" || staleClaim) && resolveButtons}
       </div>
       {row.state === "approved" && rejectedReason && <p className="text-xs text-amber-200/90">{rejectedReason}</p>}
-      {row.state === "check" && (
-        <p className="text-xs leading-5 text-amber-200/90">ApplyPilot clicked Submit but couldn&apos;t confirm it. Look for a confirmation email.</p>
-      )}
-      {staleClaim && <p className="text-xs leading-5 text-amber-200/90">No result from Chrome for over 15 minutes. Look for a confirmation email.</p>}
+      {row.state === "check" && <p className="text-xs leading-5 text-amber-200/90">{checkText(row)}</p>}
+      {staleClaim && <p className="text-xs leading-5 text-amber-200/90">{staleText(row)}</p>}
       {row.state === "submitted" && row.ats === "ashby" && (
         <p className="text-xs leading-5 text-slate-400">Applied — watch for the confirmation email. Ashby only confirms on the page.</p>
       )}
       {row.state === "needs_you" && (
         <p className="text-xs leading-5 text-slate-500">The tab stays open, already filled. Finish it there, or approve it again from Ready to send.</p>
       )}
-      {(row.state === "needs_you" || row.state === "not_sent") && reasons.length > 0 && (
+      {(row.state === "needs_you" || row.state === "not_sent" || row.state === "check") && reasons.length > 0 && (
         <ul className="list-disc space-y-0.5 pl-4 text-xs leading-5 text-amber-200/80">
           {reasons.map((reason, index) => <li key={index}>{reason}</li>)}
         </ul>

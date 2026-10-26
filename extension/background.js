@@ -29,10 +29,11 @@ async function fromDashboard(msg, sender) {
   const payload = msg.payload && typeof msg.payload === "object" ? msg.payload : {};
   switch (msg.type) {
     case "AP_HELLO":
-      await rememberFrame(sender);
+      // bridge.js says hello on load as well; only the page's own hello makes a frame one that can take claims.
+      await rememberFrame(sender, payload.passive !== true);
       return { version: VERSION, ...(await heldSummary(local, { runnerOpen: Boolean(await runnerContext()) })) };
     case "AP_BATCH": {
-      const result = await acceptBatch(local, payload.batch, { now: Date.now(), sha256 });
+      const result = await acceptBatch(local, payload.batch, { now: Date.now(), sha256, tabUrl });
       if (result.accepted.length) await ensureRunner();
       return result;
     }
@@ -42,7 +43,8 @@ async function fromDashboard(msg, sender) {
       await local.set({ [KEYS.halt]: true });
       return { ok: true };
     case "AP_RESUME": {
-      await local.set({ [KEYS.halt]: false });
+      // apWake changes every time, so the runner hears it even when apHalt was already false.
+      await local.set({ [KEYS.halt]: false, apWake: Date.now() });
       const { held } = await heldSummary(local, { runnerOpen: false });
       if (held.length) await ensureRunner();
       return { ok: true };
@@ -62,16 +64,32 @@ async function dashFrames() {
   return Array.isArray(apDash) ? apDash : [];
 }
 
-async function rememberFrame(sender) {
+async function rememberFrame(sender, ready) {
   const tabId = sender.tab.id;
   const frameId = typeof sender.frameId === "number" ? sender.frameId : 0;
-  const rest = (await dashFrames()).filter((f) => !(f.tabId === tabId && f.frameId === frameId));
-  await session.set({ apDash: [...rest, { tabId, frameId, at: Date.now() }].slice(-10) });
+  const frames = await dashFrames();
+  const before = frames.find((f) => f.tabId === tabId && f.frameId === frameId);
+  const rest = frames.filter((f) => f !== before);
+  // A passive hello from a page that already said hello itself keeps it ready, unless the page reloaded.
+  const keep = !ready && before?.ready === true && before.documentId && before.documentId === sender.documentId;
+  const top = frameId === 0 && String(sender.tab.url || "").startsWith(`${DASHBOARD_ORIGIN}/`);
+  const entry = { tabId, frameId, documentId: sender.documentId || "", ready: ready || keep, top, at: Date.now() };
+  await session.set({ apDash: [...rest, entry].slice(-10) });
+}
+
+async function tabUrl(tabId) {
+  try {
+    return (await chrome.tabs.get(tabId))?.url ?? "";
+  } catch {
+    return null;
+  }
 }
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   const frames = await dashFrames();
   if (frames.some((f) => f.tabId === tabId)) await session.set({ apDash: frames.filter((f) => f.tabId !== tabId) });
+  // A watch for a tab closed while the runner page wasn't open would otherwise refuse that job's next approval.
+  await local.remove(KEYS.watch(tabId));
 });
 
 async function runnerContext() {

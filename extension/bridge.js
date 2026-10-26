@@ -85,7 +85,8 @@
     return true;
   });
 
-  ask("AP_HELLO").then((ready) => {
+  // Passive: it tells the page the extension is here, but only the page's own hello takes claims.
+  ask("AP_HELLO", { passive: true }).then((ready) => {
     if (typeof ready.version === "string") post("AP_READY", ready);
   });
 })();
